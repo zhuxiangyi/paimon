@@ -293,6 +293,8 @@ public class TableSchema implements Serializable {
         }
 
         RowType rowType = new RowType(fields);
+        // the markers of map deltas are not physical columns
+        writeCols = MapDeltaColumns.toPhysical(rowType, writeCols);
         List<DataField> projectedFields =
                 new CoreOptions(options).dataEvolutionNestedFieldEnabled()
                         ? rowType.projectByPaths(writeCols).getFields()

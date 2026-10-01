@@ -86,6 +86,8 @@ from pypaimon.read.reader.sort_merge_reader import (SortMergeReaderWithMinHeap,
 from pypaimon.read.split import Split
 from pypaimon.read.sliced_split import SlicedSplit
 from pypaimon.schema.data_types import DataField, MapType, PyarrowFieldParser
+from pypaimon.schema.map_delta_columns import (
+    MAP_DELTA_PREFIX, map_delta_fields, to_physical)
 from pypaimon.table.special_fields import SpecialFields
 from pypaimon.globalindex.indexed_split import IndexedSplit
 from pypaimon.utils.data_evolution_utils import retrieve_anchor_file
@@ -469,9 +471,8 @@ class SplitRead(ABC):
                     "Nested-field projection is not supported on ROW files")
             file_schema = self._resolve_schema(file.schema_id)
             if file.write_cols:
-                field_map = {f.name: f for f in file_schema.fields}
-                row_full_fields = [field_map[n] for n in file.write_cols
-                                   if n in field_map]
+                # a map delta is stored under its map's name
+                row_full_fields = file_schema.data_file_fields(file.write_cols)
             elif self.table.is_primary_key_table:
                 row_full_fields = self._create_key_value_fields(
                     file_schema.fields)
@@ -1350,6 +1351,49 @@ class MergeFileSplitRead(SplitRead):
         return self._create_key_value_fields(fields)
 
 
+def check_no_map_deltas(files, read_fields, resolve_schema) -> None:
+    """Reject reading a map column whose value depends on a map delta.
+
+    A map delta only holds the entries to merge into the current value, see
+    :mod:`pypaimon.schema.map_delta_columns`. Merging them is not supported here, and
+    reading the delta as the value would silently return wrong data. A delta older than a
+    file storing the map whole no longer matters: the reader takes the newest whole value.
+    """
+    if not any(col.startswith(MAP_DELTA_PREFIX)
+               for file in files for col in file.write_cols or []):
+        return
+    read_ids = {field.id for field in read_fields}
+    # schema id -> (fields, fields by name)
+    schemas = {}
+    # (first row id, field id) -> (sequence number, whether it is a delta, file)
+    newest = {}
+    for file in files:
+        if DataFileMeta.is_blob_file(file.file_name) or DataFileMeta.is_vector_file(file.file_name):
+            continue
+        schema_id = file.schema_id
+        if schema_id not in schemas:
+            fields = resolve_schema(schema_id).fields
+            schemas[schema_id] = (fields, {field.name: field for field in fields})
+        fields, by_name = schemas[schema_id]
+        deltas = {field.id for field in map_delta_fields(fields, file.write_cols).values()}
+        if file.write_cols is None:
+            provided = {field.id for field in fields}
+        else:
+            provided = {by_name[name].id for name in to_physical(fields, file.write_cols)
+                        if name in by_name}
+        for field_id in provided & read_ids:
+            key = (file.first_row_id, field_id)
+            if key not in newest or file.max_sequence_number > newest[key][0]:
+                newest[key] = (file.max_sequence_number, field_id in deltas, file)
+    for (_, field_id), (_, is_delta, file) in newest.items():
+        if is_delta:
+            name = next(field.name for field in read_fields if field.id == field_id)
+            raise NotImplementedError(
+                "Reading map column '%s' is not supported: file %s stores it as a map "
+                "delta ('data-evolution.map-delta.enabled'). Read it with the Java "
+                "reader, or compact the table first." % (name, file.file_name))
+
+
 class DataEvolutionSplitRead(SplitRead):
 
     def __init__(
@@ -1425,6 +1469,7 @@ class DataEvolutionSplitRead(SplitRead):
     def _create_raw_reader(self) -> RecordReader:
         """Core read logic: split_by_row_id -> suppliers -> ConcatBatchReader -> filter."""
         files = self.split.files
+        check_no_map_deltas(files, self.read_fields, self._resolve_schema)
         suppliers = []
         self._genarate_deletion_file_readers()
 

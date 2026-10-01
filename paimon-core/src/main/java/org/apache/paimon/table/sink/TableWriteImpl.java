@@ -29,6 +29,7 @@ import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.mergetree.compact.CompactRewriterFactory;
 import org.apache.paimon.metrics.MetricRegistry;
+import org.apache.paimon.operation.BaseAppendFileStoreWrite;
 import org.apache.paimon.operation.BundleFileStoreWriter;
 import org.apache.paimon.operation.FileStoreWrite;
 import org.apache.paimon.operation.FileStoreWrite.State;
@@ -41,6 +42,7 @@ import org.apache.paimon.utils.RowKindFilter;
 
 import javax.annotation.Nullable;
 
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -134,6 +136,22 @@ public class TableWriteImpl<T> implements InnerTableWrite, Restorable<List<State
         write.withWriteType(writeType);
         this.writeType = writeType;
         updateNotNullFieldIndexes();
+        return this;
+    }
+
+    /**
+     * Writes the given top-level map columns of the write type as map deltas, see {@link
+     * BaseAppendFileStoreWrite#withMapDeltaColumns}. Only supported by append tables with data
+     * evolution.
+     */
+    public TableWriteImpl<T> withMapDeltaColumns(Collection<String> columns) {
+        if (columns.isEmpty() && !(write instanceof BaseAppendFileStoreWrite)) {
+            return this;
+        }
+        checkState(
+                write instanceof BaseAppendFileStoreWrite,
+                "Map deltas can only be written to an append table with data evolution.");
+        ((BaseAppendFileStoreWrite) write).withMapDeltaColumns(columns);
         return this;
     }
 

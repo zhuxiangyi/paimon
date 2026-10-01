@@ -20,7 +20,10 @@ package org.apache.paimon.operation;
 
 import org.apache.paimon.reader.DataEvolutionRow;
 import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.MapType;
 import org.apache.paimon.types.RowType;
+
+import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -48,6 +51,10 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
  * bunches. Only one level of nested composition is supported; deeper or cross-file splits of a
  * sub-struct throw {@link UnsupportedOperationException}.
  *
+ * <p>A map column whose latest providers are map-delta files (see {@link
+ * org.apache.paimon.schema.MapDeltaColumns}) is merged from all of those deltas and the newest file
+ * storing the column whole, independently of the nested-field mode.
+ *
  * <p>Separating this from {@link DataEvolutionSplitRead} keeps schema resolution and reader
  * creation out of the layout logic and lets both planning modes be unit-tested directly.
  */
@@ -57,19 +64,44 @@ class DataEvolutionReadPlanner {
     // for each bunch, the (row-tracked) row type it physically provides
     private final List<RowType> bunchAvailTypes;
     private final boolean nestedFieldEnabled;
+    // for each bunch, the ids of the map fields it stores as map deltas
+    private final List<Set<Integer>> bunchMapDeltaFieldIds;
+    // whether the bunches are only the files added in a range of snapshots
+    private final boolean incremental;
 
     DataEvolutionReadPlanner(
             RowType readRowType, List<RowType> bunchAvailTypes, boolean nestedFieldEnabled) {
+        this(readRowType, bunchAvailTypes, nestedFieldEnabled, null, false);
+    }
+
+    DataEvolutionReadPlanner(
+            RowType readRowType,
+            List<RowType> bunchAvailTypes,
+            boolean nestedFieldEnabled,
+            @Nullable List<Set<Integer>> bunchMapDeltaFieldIds,
+            boolean incremental) {
         this.readRowType = readRowType;
         this.bunchAvailTypes = bunchAvailTypes;
         this.nestedFieldEnabled = nestedFieldEnabled;
+        if (bunchMapDeltaFieldIds == null) {
+            bunchMapDeltaFieldIds = new ArrayList<>(bunchAvailTypes.size());
+            for (int i = 0; i < bunchAvailTypes.size(); i++) {
+                bunchMapDeltaFieldIds.add(Collections.emptySet());
+            }
+        }
+        checkArgument(
+                bunchMapDeltaFieldIds.size() == bunchAvailTypes.size(),
+                "Map delta field ids must be given for every bunch.");
+        this.bunchMapDeltaFieldIds = bunchMapDeltaFieldIds;
+        this.incremental = incremental;
     }
 
     DataEvolutionReadPlan plan() {
         DataEvolutionReadPlan plan = nestedFieldEnabled ? planNested() : planTopLevel();
+        planMapDeltas(plan);
         List<DataField> readFields = readRowType.getFields();
         for (int i = 0; i < readFields.size(); i++) {
-            if (plan.rowOffsets[i] == -1 && plan.nested[i] == null) {
+            if (plan.rowOffsets[i] == -1 && plan.nested[i] == null && plan.mapDeltas[i] == null) {
                 checkArgument(
                         readFields.get(i).type().isNullable(),
                         "Field %s is not null but can't find any file contains it.",
@@ -343,6 +375,80 @@ class DataEvolutionReadPlanner {
         return new DataEvolutionReadPlan(rowOffsets, fieldOffsets, nested, bunchReadFields);
     }
 
+    /**
+     * Replaces the source of every read map field whose latest providers are map deltas with a
+     * merge of those deltas and the newest bunch storing the field whole (its base). Bunches are
+     * ordered latest first. A field without a base is {@code null}: it did not exist when the rows
+     * were written, and a delta of a {@code null} map is {@code null}. An incremental read only
+     * sees the files added in its range, so a missing base does not tell that and the read fails:
+     * neither {@code null} nor the deltas are the value of the field.
+     */
+    private void planMapDeltas(DataEvolutionReadPlan plan) {
+        if (bunchMapDeltaFieldIds.stream().allMatch(Set::isEmpty)) {
+            return;
+        }
+        List<DataField> readFields = readRowType.getFields();
+        for (int j = 0; j < readFields.size(); j++) {
+            DataField rf = readFields.get(j);
+            if (!(rf.type() instanceof MapType)) {
+                continue;
+            }
+            List<Integer> deltas = new ArrayList<>();
+            int base = -1;
+            for (int b = 0; b < bunchAvailTypes.size(); b++) {
+                if (!bunchAvailTypes.get(b).containsField(rf.id())) {
+                    continue;
+                }
+                if (bunchMapDeltaFieldIds.get(b).contains(rf.id())) {
+                    deltas.add(b);
+                } else {
+                    base = b;
+                    break;
+                }
+            }
+            if (deltas.isEmpty()) {
+                // the latest provider stores the field whole, the plan already takes it from there
+                continue;
+            }
+            if (base < 0 && incremental) {
+                throw new UnsupportedOperationException(
+                        String.format(
+                                "Cannot read map column '%s' incrementally: the read range holds "
+                                        + "map deltas of it but not its whole value. Read the "
+                                        + "table in batch mode, or compact it first.",
+                                rf.name()));
+            }
+            checkArgument(
+                    base >= 0 || rf.type().isNullable(),
+                    "Field %s is not null but can't find any file contains it whole.",
+                    rf);
+            Collections.reverse(deltas);
+            int[] deltaReaders = new int[deltas.size()];
+            int[] deltaOffsets = new int[deltas.size()];
+            for (int k = 0; k < deltas.size(); k++) {
+                deltaReaders[k] = deltas.get(k);
+                deltaOffsets[k] = readOffset(plan.bunchReadFields.get(deltas.get(k)), rf);
+            }
+            int baseOffset = base < 0 ? -1 : readOffset(plan.bunchReadFields.get(base), rf);
+            plan.mapDeltas[j] =
+                    new DataEvolutionRow.MapDeltaField(
+                            (MapType) rf.type(), base, baseOffset, deltaReaders, deltaOffsets);
+            plan.rowOffsets[j] = -1;
+            plan.fieldOffsets[j] = -1;
+        }
+    }
+
+    /** The offset of {@code field} in a bunch's read fields, adding it if it is not read yet. */
+    private static int readOffset(List<DataField> bunchReadFields, DataField field) {
+        for (int i = 0; i < bunchReadFields.size(); i++) {
+            if (bunchReadFields.get(i).id() == field.id()) {
+                return i;
+            }
+        }
+        bunchReadFields.add(field);
+        return bunchReadFields.size() - 1;
+    }
+
     /** Collect (recursively) the leaf field ids of {@code fields}; only ROW types recurse. */
     private static void collectLeafIds(List<DataField> fields, Collection<Integer> out) {
         for (DataField f : fields) {
@@ -441,6 +547,8 @@ class DataEvolutionReadPlanner {
         // per read field: the sub-field assembly plan for a struct split across files (null if
         // whole)
         final DataEvolutionRow.NestedField[] nested;
+        // per read field: the merge plan for a map column with map deltas (null if whole)
+        final DataEvolutionRow.MapDeltaField[] mapDeltas;
         // per bunch: the fields (with partial nested structs) to read from that file
         final List<List<DataField>> bunchReadFields;
 
@@ -452,7 +560,17 @@ class DataEvolutionReadPlanner {
             this.rowOffsets = rowOffsets;
             this.fieldOffsets = fieldOffsets;
             this.nested = nested;
+            this.mapDeltas = new DataEvolutionRow.MapDeltaField[rowOffsets.length];
             this.bunchReadFields = bunchReadFields;
+        }
+
+        boolean hasMapDeltas() {
+            for (DataEvolutionRow.MapDeltaField mapDelta : mapDeltas) {
+                if (mapDelta != null) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 }

@@ -27,6 +27,7 @@ import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypeFamily;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.BinaryMapKeys;
 
 import javax.annotation.Nullable;
 

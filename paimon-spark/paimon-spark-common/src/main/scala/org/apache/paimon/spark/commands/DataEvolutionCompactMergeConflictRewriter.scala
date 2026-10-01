@@ -24,7 +24,7 @@ import org.apache.paimon.data.BinaryRow
 import org.apache.paimon.format.blob.BlobFileFormat.isBlobFile
 import org.apache.paimon.io.{CompactIncrement, DataFileMeta, DataIncrement}
 import org.apache.paimon.manifest.FileSource
-import org.apache.paimon.schema.TableSchema
+import org.apache.paimon.schema.{MapDeltaColumns, TableSchema}
 import org.apache.paimon.spark.util.ScanPlanHelper
 import org.apache.paimon.table.{FileStoreTable, SpecialFields}
 import org.apache.paimon.table.sink.{CommitMessage, CommitMessageImpl}
@@ -358,16 +358,23 @@ class DataEvolutionCompactMergeConflictRewriter(
     isNormalRowIdFile(file) &&
     file.fileSource().orElse(null) == FileSource.APPEND &&
     partialFileWriteCols(file).exists(
-      columns => columns.nonEmpty && columns.forall(column => !SpecialFields.isSystemField(column)))
+      columns =>
+        columns.nonEmpty && columns.forall(column => !SpecialFields.isSystemField(column))) &&
+    // a map delta only holds the entries merged into a row, it cannot be rebased onto the
+    // compacted values like a column written whole
+    !MapDeltaColumns.hasDeltas(fileSchema(file), file.writeCols())
   }
 
   private def partialFileWriteCols(file: DataFileMeta): Option[Seq[String]] = {
-    val fileSchema = fileSchemaCache.getOrElseUpdate(
+    val columns = DataEvolutionUtils.partialFileWriteCols(fileSchema(file), file)
+    if (columns.isPresent) Some(columns.get().asScala.toSeq) else None
+  }
+
+  private def fileSchema(file: DataFileMeta): TableSchema = {
+    fileSchemaCache.getOrElseUpdate(
       file.schemaId(),
       if (file.schemaId() == table.schema().id()) table.schema()
       else table.schemaManager().schema(file.schemaId()))
-    val columns = DataEvolutionUtils.partialFileWriteCols(fileSchema, file)
-    if (columns.isPresent) Some(columns.get().asScala.toSeq) else None
   }
 
 }

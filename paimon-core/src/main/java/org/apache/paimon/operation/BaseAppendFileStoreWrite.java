@@ -39,8 +39,10 @@ import org.apache.paimon.manifest.FileSource;
 import org.apache.paimon.metrics.MetricRegistry;
 import org.apache.paimon.operation.metrics.BlobFetchMetrics;
 import org.apache.paimon.reader.RecordReaderIterator;
+import org.apache.paimon.schema.MapDeltaColumns;
 import org.apache.paimon.statistics.SimpleColStatsCollector;
 import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.MapType;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.ExceptionUtils;
@@ -59,9 +61,12 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -93,6 +98,7 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
     private @Nullable BlobFetchMetrics blobFetchMetrics;
     private RowType writeType;
     private @Nullable List<String> writeCols;
+    private Set<String> mapDeltaColumns = Collections.emptySet();
     private boolean omitAllNonDedicatedWriteCols;
     private FileSource fileSource = FileSource.APPEND;
     private boolean forceBufferSpill = false;
@@ -206,6 +212,73 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
 
     @Override
     public void withWriteType(RowType writeType) {
+        this.writeType = writeType;
+        if (blobContext != null) {
+            blobContext = blobContext.withWriteType(writeType);
+        }
+        // map-delta columns describe one write type; a new write type starts without them
+        this.mapDeltaColumns = Collections.emptySet();
+        updateWriteCols();
+    }
+
+    /**
+     * Writes the given top-level {@code MAP} columns of the current write type as map deltas: each
+     * written value is merged into the current value of the row on read instead of replacing it,
+     * see {@link MapDeltaColumns}. Must be called after {@link #withWriteType(RowType)} and before
+     * the first record is written.
+     */
+    public BaseAppendFileStoreWrite withMapDeltaColumns(Collection<String> columns) {
+        if (columns.isEmpty()) {
+            this.mapDeltaColumns = Collections.emptySet();
+            updateWriteCols();
+            return this;
+        }
+        if (!options.dataEvolutionEnabled() || !options.dataEvolutionMapDeltaEnabled()) {
+            throw new UnsupportedOperationException(
+                    String.format(
+                            "Writing map deltas requires %s=true and %s=true.",
+                            CoreOptions.DATA_EVOLUTION_ENABLED.key(),
+                            CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key()));
+        }
+        Set<String> deltaColumns = new LinkedHashSet<>(columns);
+        if (MapDeltaColumns.writesDedicatedFiles(rowType, writeType, options)) {
+            throw new UnsupportedOperationException(
+                    "Map deltas cannot be written together with columns stored in dedicated "
+                            + "blob or vector files.");
+        }
+        for (String column : deltaColumns) {
+            if (!writeType.containsField(column)
+                    || !(writeType.getField(column).type() instanceof MapType)
+                    || !rowType.containsField(column)) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Map delta column '%s' is not a top-level map column of the write "
+                                        + "type %s.",
+                                column, writeType));
+            }
+            if (!MapDeltaColumns.supportsType(writeType.getField(column).type())) {
+                throw new UnsupportedOperationException(
+                        String.format(
+                                "Map delta column '%s' has keys of type %s, which cannot be "
+                                        + "merged as map deltas.",
+                                column,
+                                ((MapType) writeType.getField(column).type()).getKeyType()));
+            }
+            String deltaColumn = MapDeltaColumns.encode(column);
+            if (rowType.containsField(deltaColumn)) {
+                throw new UnsupportedOperationException(
+                        String.format(
+                                "Cannot write a map delta of column '%s' because the table has a "
+                                        + "column named '%s', which is how the delta is recorded.",
+                                column, deltaColumn));
+            }
+        }
+        this.mapDeltaColumns = deltaColumns;
+        updateWriteCols();
+        return this;
+    }
+
+    private void updateWriteCols() {
         List<String> fullNames = rowType.getFieldNames();
         List<String> writeCols;
         if (options.dataEvolutionNestedFieldEnabled()) {
@@ -217,14 +290,21 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
             // feature is disabled: a dot may be part of an ordinary top-level column name.
             writeCols = writeType.getFieldNames();
         }
-
-        this.writeType = writeType;
-        if (blobContext != null) {
-            blobContext = blobContext.withWriteType(writeType);
+        if (!mapDeltaColumns.isEmpty()) {
+            // keep the physical columns and append the markers, see MapDeltaColumns
+            List<String> withMarkers = new ArrayList<>(writeCols.size() + mapDeltaColumns.size());
+            withMarkers.addAll(writeCols);
+            for (String column : mapDeltaColumns) {
+                withMarkers.add(MapDeltaColumns.encode(column));
+            }
+            writeCols = withMarkers;
         }
+
+        // a file with map deltas must keep its write columns, they record which columns are deltas
         this.omitAllNonDedicatedWriteCols =
                 options.dataEvolutionEnabled()
                         && options.dataEvolutionWriteColsOptimizationEnabled()
+                        && mapDeltaColumns.isEmpty()
                         && writesAllNonDedicatedColumns(writeCols, options);
         // optimize writeCols to null in following cases:
         // writeType contains all columns (without _ROW_ID and _SEQUENCE_NUMBER)

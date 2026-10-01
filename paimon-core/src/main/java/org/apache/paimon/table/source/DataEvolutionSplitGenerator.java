@@ -20,6 +20,7 @@ package org.apache.paimon.table.source;
 
 import org.apache.paimon.format.blob.BlobFileFormat;
 import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.schema.MapDeltaColumns;
 import org.apache.paimon.utils.BinPacking;
 import org.apache.paimon.utils.RangeHelper;
 
@@ -67,7 +68,11 @@ public class DataEvolutionSplitGenerator implements SplitGenerator {
         return BinPacking.packForOrdered(ranges, weightFunc, targetSplitSize).stream()
                 .map(
                         f -> {
-                            boolean rawConvertible = f.stream().allMatch(file -> file.size() == 1);
+                            // a single map-delta file needs its base to be read correctly
+                            boolean rawConvertible =
+                                    f.stream()
+                                            .allMatch(
+                                                    file -> file.size() == 1 && !isMapDelta(file));
                             List<DataFileMeta> groupFiles =
                                     f.stream()
                                             .flatMap(Collection::stream)
@@ -77,6 +82,16 @@ public class DataEvolutionSplitGenerator implements SplitGenerator {
                                     : SplitGroup.nonRawConvertibleGroup(groupFiles);
                         })
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Whether a single-file range may hold a map delta, which needs its base to be read correctly.
+     * Decided by the write columns alone, like the reader, which does not consult the table options
+     * either: copied files keep their write columns. A column merely named like a map delta only
+     * loses raw conversion.
+     */
+    private static boolean isMapDelta(List<DataFileMeta> range) {
+        return MapDeltaColumns.mayContainDeltas(range.get(0).writeCols());
     }
 
     @Override

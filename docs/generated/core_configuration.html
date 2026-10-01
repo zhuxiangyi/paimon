@@ -537,6 +537,12 @@ under the License.
             <td>Whether enable data evolution for row tracking table.</td>
         </tr>
         <tr>
+            <td><h5>data-evolution.map-delta.enabled</h5></td>
+            <td style="word-wrap: break-word;">false</td>
+            <td>Boolean</td>
+            <td>Whether to enable key-level data evolution for top-level map columns. When enabled, an update that only merges entries into a map column (map_concat(m, ...)) writes an incremental file containing, per row, just the entries to merge (aligned by row id), and a read merges them into the latest whole value of the column; when disabled, the whole column is rewritten. Requires data-evolution.enabled=true. Mixed-version compatibility warning: once a file's write columns record a map delta (e.g. '_MAP_DELTA_m'), a reader, writer, compactor, or other maintenance job on an older version cannot merge it. Every such component reading or writing this table must be upgraded before enabling this option, and downgrading the binary is unsafe once such files have been committed. This option may only be enabled through a persisted table-option change; dynamic overrides and disabling or removing the option after it has been enabled are not supported. Only maps whose keys are of type STRING (VARCHAR), BYTES (VARBINARY), BOOLEAN, an integer type or DATE can be written as map deltas.</td>
+        </tr>
+        <tr>
             <td><h5>data-evolution.merge-into.file-pruning</h5></td>
             <td style="word-wrap: break-word;">true</td>
             <td>Boolean</td>

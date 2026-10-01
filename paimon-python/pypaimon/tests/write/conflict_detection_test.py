@@ -24,7 +24,7 @@ from pypaimon.manifest.index_manifest_entry import IndexManifestEntry
 from pypaimon.manifest.index_manifest_file import IndexManifestFile
 from pypaimon.manifest.schema.data_file_meta import DataFileMeta
 from pypaimon.manifest.schema.manifest_entry import ManifestEntry
-from pypaimon.schema.data_types import AtomicType, DataField
+from pypaimon.schema.data_types import AtomicType, DataField, MapType
 from pypaimon.schema.table_schema import TableSchema
 from pypaimon.table.row.generic_row import GenericRow
 from pypaimon.write.commit.conflict_detection import (
@@ -454,6 +454,29 @@ class TestRowIdColumnConflictChecker(unittest.TestCase):
     def _make_checker(self, delta_files, schema=None):
         schema_mgr = _FakeSchemaManager([schema or _DEFAULT_SCHEMA])
         return RowIdColumnConflictChecker.from_data_files(schema_mgr, delta_files)
+
+    def test_map_delta_of_committed_file_resolves_to_its_map(self):
+        schema = _FakeSchema(
+            id=0,
+            fields=[
+                DataField(1, "col_a", AtomicType("INT")),
+                DataField(2, "m", MapType(True, AtomicType("STRING"), AtomicType("INT"))),
+            ],
+        )
+        committed = _make_file("c1", row_count=100, first_row_id=0,
+                               write_cols=["m", "_MAP_DELTA_m"])
+        # a map delta written by the Java writer updates its map column
+        writes_map = self._make_checker(
+            [_make_file("d1", row_count=100, first_row_id=0, write_cols=["m"])], schema)
+        self.assertTrue(writes_map.conflicts_with(committed))
+        writes_other = self._make_checker(
+            [_make_file("d1", row_count=100, first_row_id=0, write_cols=["col_a"])], schema)
+        self.assertFalse(writes_other.conflicts_with(committed))
+        # a name that is not a map delta is still unknown
+        with self.assertRaises(RuntimeError):
+            writes_other.conflicts_with(
+                _make_file("c2", row_count=100, first_row_id=0,
+                           write_cols=["_MAP_DELTA_col_a"]))
 
     def test_no_conflict_disjoint_rows(self):
         delta_files = [

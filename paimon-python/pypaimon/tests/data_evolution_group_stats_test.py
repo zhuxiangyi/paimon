@@ -29,7 +29,7 @@ from pypaimon.read.scanner.data_evolution_split_generator import \
     DataEvolutionSplitGenerator
 from pypaimon.read.scanner.data_evolution_stats import \
     DataEvolutionGroupStatsFilter
-from pypaimon.schema.data_types import AtomicType, DataField
+from pypaimon.schema.data_types import AtomicType, DataField, MapType
 from pypaimon.table.row.generic_row import GenericRow
 from pypaimon.table.special_fields import SpecialFields
 
@@ -116,6 +116,31 @@ class DataEvolutionGroupStatsFilterTest(unittest.TestCase):
         self.assertFalse(self._filter(
             builder.equal('right_value', 500),
             {0: fields}, 0).may_match([base, delta]))
+
+    def test_map_delta_file_keeps_other_stats_and_hides_its_own(self):
+        fields = [
+            DataField(0, 'id', AtomicType('INT')),
+            DataField(1, 'm', MapType(True, AtomicType('STRING'), AtomicType('INT'))),
+            DataField(2, 'd', AtomicType('INT')),
+        ]
+        base = _file(
+            'base.parquet', 0, 10, fields, [0, None, 0], [9, None, 9],
+            null_counts=[0, 10, 0], write_cols=['id', 'm', 'd'])
+        # a Java map delta of m written with d; m holds no NULL in the delta
+        delta = _file(
+            'delta.parquet', 0, 10, fields, [None, 100], [None, 109],
+            null_counts=[0, 0], sequence=1,
+            write_cols=['m', 'd', '_MAP_DELTA_m'], value_stats_cols=['m', 'd'])
+        builder = PredicateBuilder(fields)
+
+        # the stats of d still prune
+        self.assertFalse(self._filter(
+            builder.equal('d', 500), {0: fields}, 0).may_match([base, delta]))
+        self.assertTrue(self._filter(
+            builder.equal('d', 105), {0: fields}, 0).may_match([base, delta]))
+        # the merged m is NULL in every row, the stats of the delta must not say otherwise
+        self.assertTrue(self._filter(
+            builder.is_null('m'), {0: fields}, 0).may_match([base, delta]))
 
     def test_missing_or_corrupt_stats_fail_open(self):
         fields = [DataField(0, 'value', AtomicType('INT'))]

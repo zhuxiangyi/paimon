@@ -184,6 +184,67 @@ class RowIdColumnConflictCheckerTest {
                 .hasMessageContaining("Cannot find write column 'nest.a'");
     }
 
+    @Test
+    void testMapDeltaConflictsWithWritesOfTheSameMap() {
+        for (boolean nested : Arrays.asList(false, true)) {
+            RowIdColumnConflictChecker checker =
+                    checker(
+                            nested,
+                            file("current", 0L, 10L, 5L, Arrays.asList("m", "_MAP_DELTA_m")));
+
+            assertThat(checker.conflictsWith(file("whole", 0L, 10L, 5L, Arrays.asList("m"))))
+                    .isTrue();
+            assertThat(
+                            checker.conflictsWith(
+                                    file("delta", 0L, 10L, 5L, Arrays.asList("m", "_MAP_DELTA_m"))))
+                    .isTrue();
+            assertThat(checker.conflictsWith(file("full", 0L, 10L, 5L, null))).isTrue();
+
+            checker = checker(nested, file("current", 0L, 10L, 5L, Arrays.asList("m")));
+            assertThat(
+                            checker.conflictsWith(
+                                    file("delta", 0L, 10L, 5L, Arrays.asList("m", "_MAP_DELTA_m"))))
+                    .isTrue();
+        }
+    }
+
+    @Test
+    void testMapDeltaDoesNotConflictWithOtherColumns() {
+        for (boolean nested : Arrays.asList(false, true)) {
+            RowIdColumnConflictChecker checker =
+                    checker(
+                            nested,
+                            file("current", 0L, 10L, 5L, Arrays.asList("m", "_MAP_DELTA_m")));
+
+            assertThat(checker.conflictsWith(file("other", 0L, 10L, 5L, Arrays.asList("c"))))
+                    .isFalse();
+            assertThat(
+                            checker.conflictsWith(
+                                    file(
+                                            "delta",
+                                            0L,
+                                            10L,
+                                            5L,
+                                            Arrays.asList("m2", "_MAP_DELTA_m2"))))
+                    .isFalse();
+            // a map delta does not name a column itself
+            assertThatThrownBy(
+                            () ->
+                                    checker.conflictsWith(
+                                            file(
+                                                    "invalid",
+                                                    0L,
+                                                    10L,
+                                                    5L,
+                                                    Arrays.asList("_MAP_DELTA_c"))))
+                    .hasMessageContaining("Cannot find write column '_MAP_DELTA_c'");
+        }
+    }
+
+    private RowIdColumnConflictChecker checker(boolean nested, DataFileMeta... files) {
+        return nested ? nestedChecker(files) : checker(files);
+    }
+
     private RowIdColumnConflictChecker checker(DataFileMeta... files) {
         return RowIdColumnConflictChecker.fromDataFiles(
                 createSchemaManager(), Arrays.asList(files), false);
@@ -286,6 +347,26 @@ class RowIdColumnConflictCheckerTest {
                                 Collections.emptyList(),
                                 Collections.singletonMap(
                                         CoreOptions.DATA_EVOLUTION_ENABLED.key(), "true"),
+                                "")));
+        schemas.put(
+                5L,
+                org.apache.paimon.schema.TableSchema.create(
+                        5L,
+                        new Schema(
+                                Arrays.asList(
+                                        new DataField(0, "id", DataTypes.INT()),
+                                        new DataField(
+                                                1,
+                                                "m",
+                                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
+                                        new DataField(
+                                                2,
+                                                "m2",
+                                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
+                                        new DataField(3, "c", DataTypes.INT())),
+                                Collections.emptyList(),
+                                Collections.emptyList(),
+                                dataEvolutionOptions(false),
                                 "")));
         return new TestingSchemaManager(
                 new Path("/tmp/row-id-column-conflict-checker-test"), schemas);

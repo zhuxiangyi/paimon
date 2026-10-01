@@ -27,7 +27,13 @@ import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.InternalVector;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.Variant;
+import org.apache.paimon.types.MapType;
 import org.apache.paimon.types.RowKind;
+import org.apache.paimon.utils.BinaryMapKeys;
+
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /** The row which is made up by several rows. */
 public class DataEvolutionRow implements InternalRow {
@@ -42,6 +48,18 @@ public class DataEvolutionRow implements InternalRow {
      * entry) means the field is taken whole from a single source row (the common case).
      */
     private NestedField[] nested;
+
+    /**
+     * Optional per-top-level-field plan to merge a map column whose value is spread across a base
+     * file and map-delta files (key-level data evolution). {@code null} (or a {@code null} entry)
+     * means the field is taken whole from a single source row.
+     */
+    private MapDeltaField[] mapDeltas;
+    // the merged map of each map-delta field for the current source rows, valid while its version
+    // equals rowsVersion, which changes whenever a source row does
+    private InternalMap[] mergedMaps;
+    private long[] mergedVersions;
+    private long rowsVersion;
 
     // Only nested-field composition installs nullable source rows. Ordinary union rows retain the
     // legacy invariant that every referenced source row is present.
@@ -59,6 +77,13 @@ public class DataEvolutionRow implements InternalRow {
         this.nested = nested;
     }
 
+    public void setMapDeltas(MapDeltaField[] mapDeltas) {
+        this.mapDeltas = mapDeltas;
+        this.mergedMaps = new InternalMap[mapDeltas.length];
+        this.mergedVersions = new long[mapDeltas.length];
+        Arrays.fill(mergedVersions, -1);
+    }
+
     public int rowNumber() {
         return rows.length;
     }
@@ -72,6 +97,7 @@ public class DataEvolutionRow implements InternalRow {
                 this.rowKind = row.getRowKind();
             }
             rows[pos] = row;
+            rowsVersion++;
         }
     }
 
@@ -129,6 +155,9 @@ public class DataEvolutionRow implements InternalRow {
 
     @Override
     public boolean isNullAt(int pos) {
+        if (mapDeltas != null && mapDeltas[pos] != null) {
+            return mapDeltas[pos].isNull(rows);
+        }
         if (nested != null && nested[pos] != null) {
             // a composed struct is null only when none of its source files provide it
             NestedField nf = nested[pos];
@@ -224,6 +253,13 @@ public class DataEvolutionRow implements InternalRow {
 
     @Override
     public InternalMap getMap(int pos) {
+        if (mapDeltas != null && mapDeltas[pos] != null) {
+            if (mergedVersions[pos] != rowsVersion) {
+                mergedMaps[pos] = mapDeltas[pos].merge(rows);
+                mergedVersions[pos] = rowsVersion;
+            }
+            return mergedMaps[pos];
+        }
         return chooseRow(pos).getMap(offsetInRow(pos));
     }
 
@@ -277,6 +313,81 @@ public class DataEvolutionRow implements InternalRow {
             this.partialSize = partialSize;
             this.subRowOffsets = subRowOffsets;
             this.subFieldOffsets = subFieldOffsets;
+        }
+    }
+
+    /**
+     * Plan to merge one map column from the latest file storing it whole (the base) and the
+     * map-delta files written after it. The value is {@code map_concat(base, delta_1, ...,
+     * delta_n)} with deltas in write order and the last value winning for a duplicated key: it is
+     * {@code null} if the base or any delta is {@code null}, and an empty delta changes nothing.
+     */
+    public static class MapDeltaField {
+
+        // the source reader and field offset of the base, -1 if no file stores the column whole
+        final int baseReader;
+        final int baseOffset;
+        // the source readers and field offsets of the deltas, oldest first
+        final int[] deltaReaders;
+        final int[] deltaOffsets;
+
+        private final InternalArray.ElementGetter keyGetter;
+        private final InternalArray.ElementGetter valueGetter;
+        private final boolean binaryKey;
+
+        public MapDeltaField(
+                MapType type,
+                int baseReader,
+                int baseOffset,
+                int[] deltaReaders,
+                int[] deltaOffsets) {
+            this.baseReader = baseReader;
+            this.baseOffset = baseOffset;
+            this.deltaReaders = deltaReaders;
+            this.deltaOffsets = deltaOffsets;
+            this.keyGetter = InternalArray.createElementGetter(type.getKeyType());
+            this.valueGetter = InternalArray.createElementGetter(type.getValueType());
+            this.binaryKey = BinaryMapKeys.isBinary(type.getKeyType());
+        }
+
+        boolean isNull(InternalRow[] rows) {
+            if (baseReader < 0 || rows[baseReader].isNullAt(baseOffset)) {
+                return true;
+            }
+            for (int i = 0; i < deltaReaders.length; i++) {
+                if (rows[deltaReaders[i]].isNullAt(deltaOffsets[i])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        InternalMap merge(InternalRow[] rows) {
+            InternalMap base = rows[baseReader].getMap(baseOffset);
+            Map<Object, Object> merged = null;
+            for (int i = 0; i < deltaReaders.length; i++) {
+                InternalMap delta = rows[deltaReaders[i]].getMap(deltaOffsets[i]);
+                if (delta.size() == 0) {
+                    continue;
+                }
+                if (merged == null) {
+                    merged = new LinkedHashMap<>();
+                    putAll(merged, base);
+                }
+                putAll(merged, delta);
+            }
+            // most rows of a delta file are not updated, return the base without copying it
+            return merged == null ? base : BinaryMapKeys.toOrderedGenericMap(binaryKey, merged);
+        }
+
+        private void putAll(Map<Object, Object> map, InternalMap data) {
+            InternalArray keys = data.keyArray();
+            InternalArray values = data.valueArray();
+            for (int i = 0; i < keys.size(); i++) {
+                map.put(
+                        BinaryMapKeys.hashKey(binaryKey, keyGetter.getElementOrNull(keys, i)),
+                        valueGetter.getElementOrNull(values, i));
+            }
         }
     }
 }

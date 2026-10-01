@@ -23,7 +23,10 @@ import org.apache.paimon.manifest.FileSource;
 
 import org.junit.jupiter.api.Test;
 
+import javax.annotation.Nullable;
+
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static org.apache.paimon.data.BinaryRow.EMPTY_ROW;
@@ -51,8 +54,46 @@ public class DataEvolutionSplitGeneratorTest {
         assertThat(splits.size()).isEqualTo(1);
     }
 
+    @Test
+    public void testSingleMapDeltaFileIsNotRawConvertible() {
+        DataEvolutionSplitGenerator generator = new DataEvolutionSplitGenerator(500, 1, false);
+        List<SplitGenerator.SplitGroup> plain =
+                generator.splitForBatch(
+                        Collections.singletonList(
+                                newFile(
+                                        "whole.parquet",
+                                        0L,
+                                        100L,
+                                        50,
+                                        Collections.singletonList("m"))));
+        assertThat(plain).hasSize(1);
+        assertThat(plain.get(0).rawConvertible).isTrue();
+
+        // a map delta read alone would return the delta entries as the value
+        List<SplitGenerator.SplitGroup> delta =
+                generator.splitForBatch(
+                        Collections.singletonList(
+                                newFile(
+                                        "delta.parquet",
+                                        0L,
+                                        100L,
+                                        50,
+                                        Arrays.asList("m", "_MAP_DELTA_m"))));
+        assertThat(delta).hasSize(1);
+        assertThat(delta.get(0).rawConvertible).isFalse();
+    }
+
     private static DataFileMeta newFile(
             String name, long firstRowId, long rowCount, long fileSize) {
+        return newFile(name, firstRowId, rowCount, fileSize, null);
+    }
+
+    private static DataFileMeta newFile(
+            String name,
+            long firstRowId,
+            long rowCount,
+            long fileSize,
+            @Nullable List<String> writeCols) {
         return DataFileMeta.create(
                 name,
                 fileSize,
@@ -70,7 +111,7 @@ public class DataEvolutionSplitGeneratorTest {
                 FileSource.APPEND,
                 null,
                 firstRowId,
-                null);
+                writeCols);
     }
 
     private static DataFileMeta newBlobFile(

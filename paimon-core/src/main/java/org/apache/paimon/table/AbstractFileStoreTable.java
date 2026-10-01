@@ -355,8 +355,27 @@ abstract class AbstractFileStoreTable implements FileStoreTable {
                             && !SchemaManager.isUnchangedNormalizedKey(
                                     k, oldValue, newValue, tableSchema)) {
                         SchemaManager.checkAlterTableOption(oldOptions, k, oldValue, newValue);
+                        checkMapDeltaNotDynamicallyEnabled(k, oldValue, newValue);
                     }
                 });
+    }
+
+    /**
+     * Map deltas can only be enabled by altering the table: the persisted option is what tells
+     * every reader, writer, and maintenance job that the table may contain map deltas, and it
+     * cannot be disabled again afterwards.
+     */
+    private static void checkMapDeltaNotDynamicallyEnabled(
+            String key, @Nullable String oldValue, @Nullable String newValue) {
+        if (CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key().equals(key)
+                && !Boolean.parseBoolean(oldValue)
+                && Boolean.parseBoolean(newValue)) {
+            throw new UnsupportedOperationException(
+                    String.format(
+                            "Table option '%s' can only be enabled by altering the table, not as "
+                                    + "a dynamic option.",
+                            key));
+        }
     }
 
     protected FileStoreTable copyInternal(

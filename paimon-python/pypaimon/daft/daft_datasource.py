@@ -52,6 +52,7 @@ from pypaimon.schema.data_types import (
     is_blob_type,
     is_map_blob_type,
 )
+from pypaimon.schema.map_delta_columns import MAP_DELTA_PREFIX
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -520,6 +521,9 @@ def _blob_native_covering_files(
     covering: list[DataFileMeta] = []
     for f in files:
         name = f.file_name
+        if any(col.startswith(MAP_DELTA_PREFIX) for col in f.write_cols or []):
+            # a map delta must be merged into its base, which only pypaimon's reader handles
+            return None
         if f.write_cols is None and schema_loader is not None:
             file_schema = schema_loader(f.schema_id)
             write_cols = {

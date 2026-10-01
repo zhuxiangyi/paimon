@@ -723,11 +723,42 @@ case class MergeIntoPaimonDataEvolutionTable(
             }
         }.toMap
 
+    // Key-level map pruning: a map column whose every SET merges entries into it is written as
+    // map deltas, see MapDeltaMergeInto. Falls back to a whole-column write otherwise. Gated by
+    // data-evolution.map-delta.enabled (default off).
+    val mapDeltaExprIds: Set[ExprId] = MapDeltaMergeInto.mapDeltaColumns(
+      table,
+      sparkSession.sessionState.conf,
+      updateColumnsSorted,
+      attr =>
+        matchedUpdateActions.flatMap(
+          _.assignments
+            .find(a => isModifiedAssignment(a) && assignmentKeyAttribute(a).sameRef(attr))
+            .map(_.value))
+    )
+    def isMapDeltaColumn(attr: AttributeReference): Boolean = mapDeltaExprIds.contains(attr.exprId)
+
+    // the map delta a matched update writes for a map-delta column, empty if it does not set it
+    def mapDeltaValue(action: UpdateAction, attr: AttributeReference): Expression = {
+      action.assignments
+        .find(a => isModifiedAssignment(a) && assignmentKeyAttribute(a).sameRef(attr))
+        .map(
+          a =>
+            MapDeltaMergeInto
+              .mapDelta(a.value, attr)
+              .getOrElse(throw new IllegalStateException(
+                s"Assignment ${a.value} of map-delta column ${attr.name} is not a map delta.")))
+        .getOrElse(MapDeltaMergeInto.emptyMap(attr.dataType))
+    }
+
     val prunedUpdateColumns = updateColumnsSorted.map {
       attr =>
         prunedByExprId.get(attr.exprId) match {
           case Some((_, prunedType)) =>
             AttributeReference(attr.name, prunedType, attr.nullable)()
+          // a map delta is not the value of the target column, give it an attribute of its own
+          case None if isMapDeltaColumn(attr) =>
+            AttributeReference(attr.name, attr.dataType, nullable = true)()
           case None => attr
         }
     }
@@ -754,13 +785,17 @@ case class MergeIntoPaimonDataEvolutionTable(
         case update: UpdateAction =>
           for (assignment <- update.assignments) {
             if (isModifiedAssignment(assignment)) {
-              allFields ++= extractFields(assignment.value)
+              val key = assignmentKeyAttribute(assignment)
+              // a map delta does not read the map it merges into
+              allFields ++= extractFields(
+                if (isMapDeltaColumn(key)) mapDeltaValue(update, key) else assignment.value)
             }
           }
         case _ =>
       }
     }
-    allFields ++= updateColumnsSorted.filterNot(isRawBlobUpdateColumn)
+    allFields ++= updateColumnsSorted.filterNot(
+      attr => isRawBlobUpdateColumn(attr) || isMapDeltaColumn(attr))
 
     def assignmentValue(action: UpdateAction, attr: AttributeReference): Expression = {
       action.assignments
@@ -777,6 +812,8 @@ case class MergeIntoPaimonDataEvolutionTable(
             rawBlobUpdateColumns.exists(_.sameRef(attr)) && !rawBlobModified.contains(attr.name)
           ) {
             Literal(null, attr.dataType)
+          } else if (isMapDeltaColumn(attr)) {
+            mapDeltaValue(action, attr)
           } else {
             prunedByExprId.get(attr.exprId) match {
               case Some((paths, prunedType)) =>
@@ -824,6 +861,9 @@ case class MergeIntoPaimonDataEvolutionTable(
         attr =>
           if (rawBlobUpdateColumns.exists(_.sameRef(attr))) {
             Literal(null, attr.dataType)
+          } else if (isMapDeltaColumn(attr)) {
+            // an empty map delta keeps the current value
+            MapDeltaMergeInto.emptyMap(attr.dataType)
           } else {
             prunedByExprId.get(attr.exprId) match {
               case Some((paths, prunedType)) =>
@@ -994,7 +1034,8 @@ case class MergeIntoPaimonDataEvolutionTable(
             writeType,
             rawBlobUpdateColumns
               .map(attr => attr.name -> rawBlobMarkerNamesByColumn(attr.name))
-              .toMap
+              .toMap,
+            updateColumnsSorted.filter(isMapDeltaColumn).map(_.name)
           )
           checkUpdateResult(partialCommit)
         } else {

@@ -48,7 +48,8 @@ case class DataEvolutionTableDataWrite(
     writeType: RowType,
     firstRowIdToPartitionMap: mutable.HashMap[Long, (Array[Byte], Long)],
     uriReaderFactory: UriReaderFactory,
-    rawBlobPlaceholderMarkerIndexes: Map[Int, Int])
+    rawBlobPlaceholderMarkerIndexes: Map[Int, Int],
+    mapDeltaColumns: Seq[String] = Seq.empty)
   extends InnerTableV1DataWrite {
 
   private var currentWriter: PerFileWriter = _
@@ -152,6 +153,7 @@ case class DataEvolutionTableDataWrite(
       .newWrite()
       .withWriteType(writeType)
       .asInstanceOf[TableWriteImpl[InternalRow]]
+      .withMapDeltaColumns(mapDeltaColumns.asJava)
       .getWrite
       .asInstanceOf[AbstractFileStoreWrite[InternalRow]]
       .createWriter(partition, 0)

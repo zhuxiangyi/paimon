@@ -32,6 +32,7 @@ public class DataEvolutionMergeIntoActionFactory implements ActionFactory {
     private static final String ON = "on";
     private static final String MATCHED_UPDATE_SET = "matched_update_set";
     private static final String SINK_PARALLELISM = "sink_parallelism";
+    private static final String MAP_DELTA_COLUMNS = "map_delta_columns";
 
     @Override
     public String identifier() {
@@ -54,6 +55,9 @@ public class DataEvolutionMergeIntoActionFactory implements ActionFactory {
         if (params.has(SOURCE_SQL)) {
             Collection<String> sourceSqls = params.getMultiParameter(SOURCE_SQL);
             action.withSourceSqls(sourceSqls.toArray(new String[0]));
+        }
+        if (params.has(MAP_DELTA_COLUMNS)) {
+            action.withMapDeltaColumns(params.getRequired(MAP_DELTA_COLUMNS));
         }
 
         // required params
@@ -88,7 +92,8 @@ public class DataEvolutionMergeIntoActionFactory implements ActionFactory {
                         + "--source_table <source_table_name> \\\n"
                         + "--on <merge_condition> \\\n"
                         + "--matched_update_set <update_changes> \\\n"
-                        + "--sink_parallelism <sink_parallelism>");
+                        + "--sink_parallelism <sink_parallelism> \\\n"
+                        + "[--map_delta_columns <col1,col2,...>]");
 
         System.out.println("  matched_update_set format:");
         System.out.println(
@@ -96,6 +101,10 @@ public class DataEvolutionMergeIntoActionFactory implements ActionFactory {
         System.out.println(
                 "    * (update with all source cols; require target table's schema is a projection of source's)");
 
+        System.out.println("  map_delta_columns format:");
+        System.out.println(
+                "    map columns whose set value is merged into the current map like map_concat(current, value), "
+                        + "requires 'data-evolution.map-delta.enabled' = 'true'");
         System.out.println("  alternative arguments:");
         System.out.println("    --path <table_path> to represent the table path.");
         System.out.println();

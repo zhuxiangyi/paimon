@@ -16,14 +16,14 @@
  * limitations under the License.
  */
 
-package org.apache.paimon.mergetree.compact.aggregate;
+package org.apache.paimon.utils;
 
 import org.apache.paimon.data.GenericMap;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypeRoot;
-import org.apache.paimon.utils.ByteArrayKey;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -36,7 +36,7 @@ import java.util.Map;
  * ByteArrayKey} for as long as they are in a hash collection and unwrapped when the result map is
  * built.
  */
-final class BinaryMapKeys {
+public final class BinaryMapKeys {
 
     private BinaryMapKeys() {}
 
@@ -46,7 +46,7 @@ final class BinaryMapKeys {
      * getBinary}: {@code BINARY} and {@code VARBINARY}, plus {@code GEOMETRY} and {@code GEOGRAPHY}
      * whose in-memory value is WKB.
      */
-    static boolean isBinary(DataType type) {
+    public static boolean isBinary(DataType type) {
         return type.isAnyOf(
                 DataTypeRoot.BINARY,
                 DataTypeRoot.VARBINARY,
@@ -55,21 +55,30 @@ final class BinaryMapKeys {
     }
 
     /** Wrap a key for storage in a hash collection; a no-op for every non-binary key type. */
-    static Object hashKey(boolean binaryKey, Object key) {
+    public static Object hashKey(boolean binaryKey, Object key) {
         return binaryKey && key != null ? new ByteArrayKey((byte[]) key) : key;
     }
 
     /** Build the result map, restoring the original {@code byte[]} of any wrapped key. */
-    static GenericMap toGenericMap(boolean binaryKey, Map<Object, Object> map) {
-        if (!binaryKey) {
-            return new GenericMap(map);
-        }
-        Map<Object, Object> unwrapped = new HashMap<>(map.size());
+    public static GenericMap toGenericMap(boolean binaryKey, Map<Object, Object> map) {
+        return new GenericMap(binaryKey ? unwrap(map, new HashMap<>(map.size())) : map);
+    }
+
+    /**
+     * Like {@link #toGenericMap(boolean, Map)}, keeping the iteration order of {@code map} for the
+     * entries of the result.
+     */
+    public static GenericMap toOrderedGenericMap(boolean binaryKey, Map<Object, Object> map) {
+        return new GenericMap(binaryKey ? unwrap(map, new LinkedHashMap<>(map.size())) : map);
+    }
+
+    private static Map<Object, Object> unwrap(
+            Map<Object, Object> map, Map<Object, Object> unwrapped) {
         map.forEach(
                 (key, value) ->
                         unwrapped.put(
                                 key instanceof ByteArrayKey ? ((ByteArrayKey) key).bytes() : key,
                                 value));
-        return new GenericMap(unwrapped);
+        return unwrapped;
     }
 }

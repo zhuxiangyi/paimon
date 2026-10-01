@@ -2615,6 +2615,31 @@ public class CoreOptions implements Serializable {
                                     + "table-option change; dynamic overrides and disabling or removing "
                                     + "the option after it has been enabled are not supported.");
 
+    public static final ConfigOption<Boolean> DATA_EVOLUTION_MAP_DELTA_ENABLED =
+            key("data-evolution.map-delta.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether to enable key-level data evolution for top-level map "
+                                    + "columns. When enabled, an update that only merges entries "
+                                    + "into a map column (map_concat(m, ...)) writes an incremental "
+                                    + "file containing, per row, just the entries to merge (aligned "
+                                    + "by row id), and a read merges them into the latest whole "
+                                    + "value of the column; when disabled, the whole column is "
+                                    + "rewritten. Requires data-evolution.enabled=true. "
+                                    + "Mixed-version compatibility warning: once a file's write "
+                                    + "columns record a map delta (e.g. '_MAP_DELTA_m'), a reader, "
+                                    + "writer, compactor, or other maintenance job on an older "
+                                    + "version cannot merge it. Every such component reading or "
+                                    + "writing this table must be upgraded before enabling this "
+                                    + "option, and downgrading the binary is unsafe once such files "
+                                    + "have been committed. This option may only be enabled through a "
+                                    + "persisted table-option change; dynamic overrides and disabling "
+                                    + "or removing the option after it has been enabled are not "
+                                    + "supported. Only maps whose keys are of type STRING (VARCHAR), "
+                                    + "BYTES (VARBINARY), BOOLEAN, an integer type or DATE can be "
+                                    + "written as map deltas.");
+
     public static final ConfigOption<Long> DATA_EVOLUTION_REASSIGN_SKIP_CONTIGUOUS_ROW_COUNT =
             key("data-evolution.reassign.skip-contiguous-row-count")
                     .longType()
@@ -4572,6 +4597,10 @@ public class CoreOptions implements Serializable {
 
     public boolean dataEvolutionNestedFieldEnabled() {
         return options.get(DATA_EVOLUTION_NESTED_FIELD_ENABLED);
+    }
+
+    public boolean dataEvolutionMapDeltaEnabled() {
+        return options.get(DATA_EVOLUTION_MAP_DELTA_ENABLED);
     }
 
     public long dataEvolutionReassignSkipContiguousRowCount() {

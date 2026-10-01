@@ -18,7 +18,13 @@
 
 package org.apache.paimon.operation;
 
+import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.GenericMap;
+import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.data.InternalMap;
+import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.operation.DataEvolutionReadPlanner.DataEvolutionReadPlan;
+import org.apache.paimon.reader.DataEvolutionRow;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
@@ -27,6 +33,11 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -399,6 +410,233 @@ class DataEvolutionReadPlannerTest {
         RowType subProviderReadType = (RowType) plan.bunchReadFields.get(0).get(0).type();
         assertThat(subProviderReadType.getFields()).containsExactly(projectedSub);
         assertThat(plan.bunchReadFields.get(1)).containsExactly(readType.getFields().get(0));
+    }
+
+    // ----------------------------- map deltas -----------------------------
+
+    private static final DataField ID = new DataField(0, "id", DataTypes.INT());
+    private static final DataField M =
+            new DataField(1, "m", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()));
+    private static final RowType MAP_READ_TYPE = new RowType(Arrays.asList(ID, M));
+
+    @Test
+    void testMapDeltasAreMergedIntoTheBase() {
+        for (boolean nestedFieldEnabled : Arrays.asList(false, true)) {
+            // bunches latest first: two deltas of m, then the base with id and m
+            List<RowType> bunches = Arrays.asList(rowType(M), rowType(M), MAP_READ_TYPE);
+            DataEvolutionReadPlan plan =
+                    new DataEvolutionReadPlanner(
+                                    MAP_READ_TYPE,
+                                    bunches,
+                                    nestedFieldEnabled,
+                                    Arrays.asList(ids(1), ids(1), ids()),
+                                    false)
+                            .plan();
+
+            assertThat(plan.rowOffsets).containsExactly(2, -1);
+            assertThat(plan.mapDeltas[0]).isNull();
+            assertThat(plan.mapDeltas[1]).isNotNull();
+            assertThat(plan.bunchReadFields.get(0)).containsExactly(M);
+            assertThat(plan.bunchReadFields.get(1)).containsExactly(M);
+            assertThat(plan.bunchReadFields.get(2)).containsExactly(ID, M);
+
+            InternalRow row =
+                    compose(
+                            plan,
+                            bunches,
+                            GenericRow.of(map("b", 3)),
+                            GenericRow.of(map("a", 2, "b", 2)),
+                            GenericRow.of(7, map("a", 1, "c", 1)));
+            assertThat(row.getInt(0)).isEqualTo(7);
+            assertThat(row.isNullAt(1)).isFalse();
+            // the older delta applies first, the latest one wins
+            assertThat(toJavaMap(row.getMap(1))).isEqualTo(javaMap("a", 2, "c", 1, "b", 3));
+        }
+    }
+
+    @Test
+    void testWholeFileStopsTheMapDeltaChain() {
+        // bunches latest first: delta, whole, older delta, base
+        List<RowType> bunches = Arrays.asList(rowType(M), rowType(M), rowType(M), MAP_READ_TYPE);
+        DataEvolutionReadPlan plan =
+                new DataEvolutionReadPlanner(
+                                MAP_READ_TYPE,
+                                bunches,
+                                false,
+                                Arrays.asList(ids(1), ids(), ids(1), ids()),
+                                false)
+                        .plan();
+
+        assertThat(plan.mapDeltas[1]).isNotNull();
+        // neither the older delta nor the base is read for m
+        assertThat(plan.bunchReadFields.get(2)).isEmpty();
+        assertThat(plan.bunchReadFields.get(3)).containsExactly(ID);
+
+        InternalRow row =
+                compose(
+                        plan,
+                        bunches,
+                        GenericRow.of(map("b", 2)),
+                        GenericRow.of(map("z", 0)),
+                        GenericRow.of(map("x", 9)),
+                        GenericRow.of(1, map("a", 1)));
+        assertThat(toJavaMap(row.getMap(1))).isEqualTo(javaMap("z", 0, "b", 2));
+    }
+
+    @Test
+    void testOlderMapDeltasAreIgnoredOnceTheColumnIsWrittenWhole() {
+        DataEvolutionReadPlan plan =
+                new DataEvolutionReadPlanner(
+                                MAP_READ_TYPE,
+                                Arrays.asList(rowType(M), rowType(M), MAP_READ_TYPE),
+                                false,
+                                Arrays.asList(ids(), ids(1), ids()),
+                                false)
+                        .plan();
+
+        assertThat(plan.mapDeltas).containsOnlyNulls();
+        assertThat(plan.rowOffsets).containsExactly(2, 0);
+        assertThat(plan.bunchReadFields.get(1)).isEmpty();
+    }
+
+    @Test
+    void testMapDeltaWithoutBaseIsNull() {
+        List<RowType> bunches = Arrays.asList(rowType(M), rowType(ID));
+        DataEvolutionReadPlan plan =
+                new DataEvolutionReadPlanner(
+                                MAP_READ_TYPE, bunches, false, Arrays.asList(ids(1), ids()), false)
+                        .plan();
+
+        InternalRow row = compose(plan, bunches, GenericRow.of(map("a", 1)), GenericRow.of(5));
+        assertThat(row.getInt(0)).isEqualTo(5);
+        assertThat(row.isNullAt(1)).isTrue();
+    }
+
+    @Test
+    void testMapDeltaWithoutBaseInIncrementalRead() {
+        List<RowType> bunches = Arrays.asList(rowType(M), rowType(ID));
+        List<Set<Integer>> deltas = Arrays.asList(ids(1), ids());
+        DataField notNullMap =
+                new DataField(1, "m", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()).notNull());
+        for (DataField map : Arrays.asList(M, notNullMap)) {
+            RowType readType = new RowType(Arrays.asList(ID, map));
+            assertThatThrownBy(
+                            () ->
+                                    new DataEvolutionReadPlanner(
+                                                    readType, bunches, false, deltas, true)
+                                            .plan())
+                    .isInstanceOf(UnsupportedOperationException.class)
+                    .hasMessageContaining("Cannot read map column 'm' incrementally");
+        }
+        // a batch read of a NOT NULL map needs its whole value
+        RowType readType = new RowType(Arrays.asList(ID, notNullMap));
+        assertThatThrownBy(
+                        () ->
+                                new DataEvolutionReadPlanner(
+                                                readType, bunches, false, deltas, false)
+                                        .plan())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("is not null");
+    }
+
+    @Test
+    void testMapDeltasAreNotReadWithoutTheMap() {
+        DataEvolutionReadPlan plan =
+                new DataEvolutionReadPlanner(
+                                rowType(ID),
+                                Arrays.asList(rowType(M), MAP_READ_TYPE),
+                                false,
+                                Arrays.asList(ids(1), ids()),
+                                false)
+                        .plan();
+
+        assertThat(plan.mapDeltas).containsOnlyNulls();
+        assertThat(plan.bunchReadFields.get(0)).isEmpty();
+        assertThat(plan.bunchReadFields.get(1)).containsExactly(ID);
+    }
+
+    @Test
+    void testMapDeltaNextToComposedStruct() {
+        DataField nest =
+                new DataField(
+                        2,
+                        "nest",
+                        DataTypes.ROW(
+                                new DataField(3, "a", DataTypes.INT()),
+                                new DataField(4, "b", DataTypes.INT())));
+        RowType readType = new RowType(Arrays.asList(ID, M, nest));
+        // bunch0: nest.a and a delta of m, bunch1: everything
+        RowType partial =
+                new RowType(
+                        Arrays.asList(
+                                M,
+                                new DataField(
+                                        2,
+                                        "nest",
+                                        DataTypes.ROW(new DataField(3, "a", DataTypes.INT())))));
+        DataEvolutionReadPlan plan =
+                new DataEvolutionReadPlanner(
+                                readType,
+                                Arrays.asList(partial, readType),
+                                true,
+                                Arrays.asList(ids(1), ids()),
+                                false)
+                        .plan();
+
+        assertThat(plan.nested[2]).isNotNull();
+        assertThat(plan.mapDeltas[1]).isNotNull();
+        assertThat(plan.bunchReadFields.get(1)).contains(ID, M);
+    }
+
+    private static Set<Integer> ids(Integer... ids) {
+        return new HashSet<>(Arrays.asList(ids));
+    }
+
+    /**
+     * Builds the row of a plan from one source row per bunch, holding the fields the bunch provides
+     * in the order of its type.
+     */
+    private static InternalRow compose(
+            DataEvolutionReadPlan plan, List<RowType> bunches, GenericRow... sources) {
+        DataEvolutionRow row =
+                new DataEvolutionRow(sources.length, plan.rowOffsets, plan.fieldOffsets);
+        row.setMapDeltas(plan.mapDeltas);
+        for (int i = 0; i < sources.length; i++) {
+            List<DataField> readFields = plan.bunchReadFields.get(i);
+            Object[] values = new Object[readFields.size()];
+            for (int f = 0; f < values.length; f++) {
+                int index = bunches.get(i).getFieldIndexByFieldId(readFields.get(f).id());
+                values[f] = sources[i].getField(index);
+            }
+            row.setRow(i, GenericRow.of(values));
+        }
+        return row;
+    }
+
+    private static GenericMap map(Object... kvs) {
+        Map<Object, Object> map = new LinkedHashMap<>();
+        for (int i = 0; i < kvs.length; i += 2) {
+            map.put(BinaryString.fromString((String) kvs[i]), kvs[i + 1]);
+        }
+        return new GenericMap(map);
+    }
+
+    private static Map<String, Integer> javaMap(Object... kvs) {
+        Map<String, Integer> map = new LinkedHashMap<>();
+        for (int i = 0; i < kvs.length; i += 2) {
+            map.put((String) kvs[i], (Integer) kvs[i + 1]);
+        }
+        return map;
+    }
+
+    private static Map<String, Integer> toJavaMap(InternalMap map) {
+        Map<String, Integer> result = new LinkedHashMap<>();
+        for (int i = 0; i < map.size(); i++) {
+            result.put(
+                    map.keyArray().getString(i).toString(),
+                    map.valueArray().isNullAt(i) ? null : map.valueArray().getInt(i));
+        }
+        return result;
     }
 
     private static RowType rowType(DataField field) {

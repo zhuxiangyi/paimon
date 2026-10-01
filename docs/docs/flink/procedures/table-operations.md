@@ -88,7 +88,8 @@ To perform "MERGE INTO" syntax specially implemented for data-evolution tables. 
 ```sql
 -- Use indexed argument
 CALL [catalog.]sys.data_evolution_merge_into('targetTable','targetAlias',
-    'sourceSqls','sourceTable','mergeCondition','matchedUpdateSet',sinkParallelism);
+    'sourceSqls','sourceTable','mergeCondition','matchedUpdateSet',sinkParallelism,
+    'mapDeltaColumns');
 
 -- Use named argument
 CALL [catalog.]sys.data_evolution_merge_into(
@@ -98,8 +99,14 @@ CALL [catalog.]sys.data_evolution_merge_into(
     source_table => 'sourceTable',
     merge_condition => 'mergeCondition',
     matched_update_set => 'matchedUpdateSet',
-    sink_parallelism => sinkParallelism);
+    sink_parallelism => sinkParallelism,
+    map_delta_columns => 'mapDeltaColumns');
 ```
+
+`map_delta_columns` is optional: a comma-separated list of map columns whose set
+values are merged into the current maps, like `map_concat(current, value)`, instead
+of replacing them. It requires `data-evolution.map-delta.enabled = true`, see
+[map deltas](../../multimodal-table/data-evolution#map-deltas).
 
 **Example**
 

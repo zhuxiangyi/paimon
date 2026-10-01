@@ -61,16 +61,19 @@ case class DataEvolutionPaimonWriter(paimonTable: FileStoreTable, dataSplits: Se
       } else {
         table.rowType().project(columnNames.asJava)
       },
-      rawBlobPlaceholderMarkerColumns
+      rawBlobPlaceholderMarkerColumns,
+      Seq.empty
     )
   }
 
   // Sub-field-aware write: writeType is already pruned to the written top-level columns and
-  // (possibly) nested sub-fields via dotted paths.
+  // (possibly) nested sub-fields via dotted paths. The values of mapDeltaColumns are map deltas,
+  // merged into the current values of the rows on read.
   def writePartialFields(
       data: DataFrame,
       writeType: RowType,
-      rawBlobPlaceholderMarkerColumns: Map[String, String]): Seq[CommitMessage] = {
+      rawBlobPlaceholderMarkerColumns: Map[String, String],
+      mapDeltaColumns: Seq[String]): Seq[CommitMessage] = {
     val sparkSession = data.sparkSession
     val uriReaderFactory = uriReaderFactoryForBlobDescriptor
     import sparkSession.implicits._
@@ -136,7 +139,8 @@ case class DataEvolutionPaimonWriter(paimonTable: FileStoreTable, dataSplits: Se
               writeType,
               firstRowIdToPartitionMapBroadcast.value,
               uriReaderFactory,
-              rawBlobPlaceholderMarkerIndexes)
+              rawBlobPlaceholderMarkerIndexes,
+              mapDeltaColumns)
             try {
               iter.foreach(row => write.write(row))
               Iterator.apply(write.commit)
