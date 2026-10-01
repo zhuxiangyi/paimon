@@ -1059,6 +1059,18 @@ final class SchemaManagerUtils {
             }
         }
 
+        if (CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key().equals(key)) {
+            boolean oldEnabled =
+                    oldValue == null
+                            ? CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.defaultValue()
+                            : Boolean.parseBoolean(oldValue);
+            boolean newEnabled = Boolean.parseBoolean(newValue);
+            if (oldEnabled && !newEnabled) {
+                throw new UnsupportedOperationException(
+                        String.format("Cannot disable table option '%s'.", key));
+            }
+        }
+
         if (CoreOptions.BUCKET.key().equals(key)) {
             int oldBucket =
                     oldValue == null
@@ -1157,6 +1169,14 @@ final class SchemaManagerUtils {
                     key,
                     options.get(key),
                     CoreOptions.DATA_EVOLUTION_NESTED_FIELD_ENABLED.defaultValue().toString());
+        }
+
+        if (CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key().equals(key)) {
+            checkAlterTableOption(
+                    options,
+                    key,
+                    options.get(key),
+                    CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.defaultValue().toString());
         }
 
         if (IGNORE_DELETE.key().equals(key)) {

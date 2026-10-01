@@ -82,6 +82,10 @@ public class DataEvolutionMergeIntoProcedure extends ProcedureBase {
                 @ArgumentHint(
                         name = "sink_parallelism",
                         type = @DataTypeHint("INTEGER"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "map_delta_columns",
+                        type = @DataTypeHint("STRING"),
                         isOptional = true)
             })
     public String[] call(
@@ -92,7 +96,8 @@ public class DataEvolutionMergeIntoProcedure extends ProcedureBase {
             String sourceTable,
             String mergeCondition,
             String matchedUpdateSet,
-            Integer sinkParallelism) {
+            Integer sinkParallelism,
+            String mapDeltaColumns) {
         targetTableId = notnull(targetTableId);
         targetAlias = notnull(targetAlias);
         sourceSqls = notnull(sourceSqls);
@@ -123,6 +128,9 @@ public class DataEvolutionMergeIntoProcedure extends ProcedureBase {
         action.withMatchedUpdateSet(matchedUpdateSet);
 
         action.withSinkParallelism(sinkParallelism);
+        if (!notnull(mapDeltaColumns).isEmpty()) {
+            action.withMapDeltaColumns(mapDeltaColumns);
+        }
 
         action.withStreamExecutionEnvironment(procedureContext.getExecutionEnvironment());
 

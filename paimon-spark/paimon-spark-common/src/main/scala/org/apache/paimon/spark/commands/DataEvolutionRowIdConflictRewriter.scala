@@ -23,7 +23,7 @@ import org.apache.paimon.data.BinaryRow
 import org.apache.paimon.format.blob.BlobFileFormat.isBlobFile
 import org.apache.paimon.io.{DataFileMeta, DataIncrement}
 import org.apache.paimon.operation.commit.RowIdExistenceConflictException
-import org.apache.paimon.schema.TableSchema
+import org.apache.paimon.schema.{MapDeltaColumns, TableSchema}
 import org.apache.paimon.spark.util.ScanPlanHelper
 import org.apache.paimon.table.{FileStoreTable, SpecialFields}
 import org.apache.paimon.table.sink.{CommitMessage, CommitMessageImpl}
@@ -83,6 +83,11 @@ private[spark] class DataEvolutionRowIdConflictRewriter(
           isDedicatedFile(staged.file) && staged.file.firstRowId() != null &&
             staged.file.firstRowId() < nextRowId)
     ) {
+      return None
+    }
+    // A map delta only holds the entries merged into a row, so it cannot be rebased onto the
+    // latest values like a column written whole. Leave the conflict to the commit.
+    if (stagedFiles.exists(staged => hasMapDeltas(staged.file))) {
       return None
     }
 
@@ -237,12 +242,18 @@ private[spark] class DataEvolutionRowIdConflictRewriter(
   }
 
   private def partialFileWriteCols(file: DataFileMeta): Option[Seq[String]] = {
-    val fileSchema = fileSchemaCache.getOrElseUpdate(
+    val columns = DataEvolutionUtils.partialFileWriteCols(fileSchema(file), file)
+    if (columns.isPresent) Some(columns.get().asScala.toSeq) else None
+  }
+
+  private def hasMapDeltas(file: DataFileMeta): Boolean =
+    MapDeltaColumns.hasDeltas(fileSchema(file), file.writeCols())
+
+  private def fileSchema(file: DataFileMeta): TableSchema = {
+    fileSchemaCache.getOrElseUpdate(
       file.schemaId(),
       if (file.schemaId() == table.schema().id()) table.schema()
       else table.schemaManager().schema(file.schemaId()))
-    val columns = DataEvolutionUtils.partialFileWriteCols(fileSchema, file)
-    if (columns.isPresent) Some(columns.get().asScala.toSeq) else None
   }
 
   private def withoutCandidates(

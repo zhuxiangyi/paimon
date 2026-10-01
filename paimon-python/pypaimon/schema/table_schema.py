@@ -29,6 +29,7 @@ from pypaimon.schema.data_types import (
     current_highest_field_id,
     is_blob_file_field,
 )
+from pypaimon.schema.map_delta_columns import to_physical
 from pypaimon.schema.schema import Schema
 
 
@@ -119,7 +120,7 @@ class TableSchema:
             fields_by_name = {field.name: field for field in self.fields}
             return [
                 fields_by_name[name]
-                for name in write_cols
+                for name in to_physical(self.fields, write_cols)
                 if name in fields_by_name
             ]
 

@@ -58,6 +58,7 @@ public class DataEvolutionFileReader implements RecordReader<InternalRow> {
     private final int[] fieldOffsets;
     private final RecordReader<InternalRow>[] readers;
     @Nullable private final DataEvolutionRow.NestedField[] nested;
+    @Nullable private final DataEvolutionRow.MapDeltaField[] mapDeltas;
 
     public DataEvolutionFileReader(
             int[] rowOffsets, int[] fieldOffsets, RecordReader<InternalRow>[] readers) {
@@ -69,6 +70,15 @@ public class DataEvolutionFileReader implements RecordReader<InternalRow> {
             int[] fieldOffsets,
             RecordReader<InternalRow>[] readers,
             @Nullable DataEvolutionRow.NestedField[] nested) {
+        this(rowOffsets, fieldOffsets, readers, nested, null);
+    }
+
+    public DataEvolutionFileReader(
+            int[] rowOffsets,
+            int[] fieldOffsets,
+            RecordReader<InternalRow>[] readers,
+            @Nullable DataEvolutionRow.NestedField[] nested,
+            @Nullable DataEvolutionRow.MapDeltaField[] mapDeltas) {
         checkArgument(rowOffsets != null, "Row offsets must not be null");
         checkArgument(fieldOffsets != null, "Field offsets must not be null");
         checkArgument(
@@ -80,6 +90,7 @@ public class DataEvolutionFileReader implements RecordReader<InternalRow> {
         this.fieldOffsets = fieldOffsets;
         this.readers = readers;
         this.nested = nested;
+        this.mapDeltas = mapDeltas;
     }
 
     @Override
@@ -88,6 +99,9 @@ public class DataEvolutionFileReader implements RecordReader<InternalRow> {
         DataEvolutionRow row = new DataEvolutionRow(readers.length, rowOffsets, fieldOffsets);
         if (nested != null) {
             row.setNested(nested);
+        }
+        if (mapDeltas != null) {
+            row.setMapDeltas(mapDeltas);
         }
         RecordIterator<InternalRow>[] iterators = new RecordIterator[readers.length];
         for (int i = 0; i < readers.length; i++) {

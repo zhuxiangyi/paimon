@@ -35,6 +35,7 @@ import org.apache.paimon.flink.sorter.SortOperator;
 import org.apache.paimon.flink.utils.FlinkCalciteClasses;
 import org.apache.paimon.flink.utils.InternalTypeInfo;
 import org.apache.paimon.manifest.ManifestCommittable;
+import org.apache.paimon.schema.MapDeltaColumns;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.types.BlobType;
@@ -43,6 +44,7 @@ import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypeCasts;
 import org.apache.paimon.types.DataTypeFamily;
 import org.apache.paimon.types.DataTypeRoot;
+import org.apache.paimon.types.MapType;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.Preconditions;
 
@@ -135,6 +137,9 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
 
     private int sinkParallelism;
 
+    // map columns whose SET value is merged into the current map instead of replacing it
+    private List<String> mapDeltaColumns = Collections.emptyList();
+
     // the snapshot id this action based on
     private long baseSnapshotId;
 
@@ -208,6 +213,22 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
 
     public DataEvolutionMergeIntoAction withMatchedUpdateSet(String matchedUpdateSet) {
         this.matchedUpdateSet = matchedUpdateSet;
+        return this;
+    }
+
+    /**
+     * Merges the SET values of the given top-level map columns into their current values, like
+     * {@code map_concat(current, value)} with the last value winning for a duplicated key: only the
+     * merged entries are written, as map deltas. Requires {@code
+     * data-evolution.map-delta.enabled=true}.
+     */
+    public DataEvolutionMergeIntoAction withMapDeltaColumns(String mapDeltaColumns) {
+        this.mapDeltaColumns =
+                Arrays.stream(mapDeltaColumns.split(","))
+                        .map(String::trim)
+                        .filter(column -> !column.isEmpty())
+                        .distinct()
+                        .collect(Collectors.toList());
         return this;
     }
 
@@ -335,6 +356,7 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
             }
             sourceType = new RowType(srcFields);
         }
+        checkMapDeltaColumns();
 
         return Tuple2.of(toDataStream(source), sourceType);
     }
@@ -702,7 +724,11 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
                         "PARTIAL WRITE COLUMNS",
                         new CommittableTypeInfo(),
                         new DataEvolutionPartialWriteOperator(
-                                (FileStoreTable) table, rowType, writePaths, baseSnapshotId))
+                                (FileStoreTable) table,
+                                rowType,
+                                writePaths,
+                                baseSnapshotId,
+                                mapDeltaColumns))
                 .setParallelism(sinkParallelism);
     }
 
@@ -887,6 +913,55 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
         }
         if (!foundRowIdColumn) {
             throw new IllegalStateException("_ROW_ID column not found in generated source.");
+        }
+    }
+
+    /** Validates the map-delta columns against the SET targets. */
+    private void checkMapDeltaColumns() {
+        if (mapDeltaColumns.isEmpty()) {
+            return;
+        }
+        if (!coreOptions.dataEvolutionMapDeltaEnabled()) {
+            throw new UnsupportedOperationException(
+                    "Map delta columns "
+                            + mapDeltaColumns
+                            + " require '"
+                            + CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key()
+                            + "=true'.");
+        }
+        RowType rowType = table.rowType();
+        for (String column : mapDeltaColumns) {
+            if (!writePaths.contains(column)) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Map delta column '%s' is not a column updated as a whole by the "
+                                        + "matched update set.",
+                                column));
+            }
+            if (!(rowType.getField(column).type() instanceof MapType)) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Map delta column '%s' is not a map column but %s.",
+                                column, rowType.getField(column).type()));
+            }
+            if (!MapDeltaColumns.supportsType(rowType.getField(column).type())) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Map delta column '%s' has keys of type %s, which cannot be "
+                                        + "merged as map deltas.",
+                                column, ((MapType) rowType.getField(column).type()).getKeyType()));
+            }
+        }
+        // fail before the job is submitted instead of in every writer
+        RowType writeType =
+                nestedFieldEnabled
+                        ? rowType.projectByPaths(writePaths)
+                        : rowType.project(writePaths);
+        if (MapDeltaColumns.writesDedicatedFiles(rowType, writeType, coreOptions)) {
+            throw new UnsupportedOperationException(
+                    "Map delta columns cannot be written together with columns stored in "
+                            + "dedicated blob or vector files: "
+                            + writePaths);
         }
     }
 

@@ -19,6 +19,7 @@
 package org.apache.paimon.operation.commit;
 
 import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.schema.MapDeltaColumns;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.types.DataField;
@@ -239,7 +240,7 @@ public class RowIdColumnConflictChecker implements RowIdConflictChecker {
     private static class TopLevelFieldIdResolver implements WriteFieldIdResolver {
 
         private final SchemaManager schemaManager;
-        private final Map<Long, Map<String, Integer>> fieldIdByNameCache = new HashMap<>();
+        private final Map<Long, RowType> rowTypeCache = new HashMap<>();
         private final Map<Long, List<Integer>> allFieldIdsCache = new HashMap<>();
 
         private TopLevelFieldIdResolver(SchemaManager schemaManager) {
@@ -259,19 +260,21 @@ public class RowIdColumnConflictChecker implements RowIdConflictChecker {
 
         @Override
         public List<Integer> resolve(long schemaId, String writeCol) {
-            Integer fieldId = fieldIdByName(schemaId).get(writeCol);
-            if (fieldId == null) {
+            RowType rowType = rowType(schemaId);
+            // a map delta updates the map column it merges into
+            String column =
+                    rowType.containsField(writeCol)
+                            ? writeCol
+                            : MapDeltaColumns.decode(rowType, writeCol);
+            if (column == null) {
                 throw unknownWriteColumn(schemaId, writeCol, null);
             }
-            return Collections.singletonList(fieldId);
+            return Collections.singletonList(rowType.getField(column).id());
         }
 
-        private Map<String, Integer> fieldIdByName(long schemaId) {
-            return fieldIdByNameCache.computeIfAbsent(
-                    schemaId,
-                    id ->
-                            schemaManager.schema(id).fields().stream()
-                                    .collect(Collectors.toMap(DataField::name, DataField::id)));
+        private RowType rowType(long schemaId) {
+            return rowTypeCache.computeIfAbsent(
+                    schemaId, id -> schemaManager.schema(id).logicalRowType());
         }
     }
 
@@ -305,7 +308,12 @@ public class RowIdColumnConflictChecker implements RowIdConflictChecker {
             // if the path does not exist in the schema.
             RowType projected;
             try {
-                projected = rowType(schemaId).projectByPaths(Collections.singletonList(writeCol));
+                String mapColumn = MapDeltaColumns.decode(rowType(schemaId), writeCol);
+                projected =
+                        rowType(schemaId)
+                                .projectByPaths(
+                                        Collections.singletonList(
+                                                mapColumn == null ? writeCol : mapColumn));
             } catch (IllegalArgumentException e) {
                 throw unknownWriteColumn(schemaId, writeCol, e);
             }

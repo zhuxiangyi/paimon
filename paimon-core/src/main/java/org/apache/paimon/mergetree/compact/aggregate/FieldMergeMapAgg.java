@@ -22,6 +22,7 @@ import org.apache.paimon.data.GenericMap;
 import org.apache.paimon.data.InternalArray;
 import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.types.MapType;
+import org.apache.paimon.utils.BinaryMapKeys;
 
 import java.util.HashMap;
 import java.util.HashSet;

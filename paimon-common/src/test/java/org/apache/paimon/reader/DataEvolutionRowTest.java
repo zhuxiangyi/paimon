@@ -20,15 +20,22 @@ package org.apache.paimon.reader;
 
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Decimal;
+import org.apache.paimon.data.GenericMap;
+import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalArray;
 import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.data.variant.Variant;
+import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.types.MapType;
 import org.apache.paimon.types.RowKind;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -187,5 +194,106 @@ public class DataEvolutionRowTest {
         InternalRow value = mock(InternalRow.class);
         when(row2.getRow(0, 5)).thenReturn(value);
         assertThat(dataEvolutionRow.getRow(1, 5)).isSameAs(value);
+    }
+
+    @Test
+    public void testMapDeltaMerge() {
+        MapType type = DataTypes.MAP(DataTypes.STRING(), DataTypes.INT());
+        // field 0 from the base in source 2, deltas in sources 1 (older) and 0 (newer)
+        DataEvolutionRow row = new DataEvolutionRow(3, new int[] {-1}, new int[] {-1});
+        row.setMapDeltas(
+                new DataEvolutionRow.MapDeltaField[] {
+                    new DataEvolutionRow.MapDeltaField(
+                            type, 2, 0, new int[] {1, 0}, new int[] {0, 0})
+                });
+
+        GenericMap base = stringMap("a", 1, "b", 2);
+        row.setRows(
+                new InternalRow[] {
+                    GenericRow.of(stringMap("b", 30, "d", 4)),
+                    GenericRow.of(stringMap("b", 20, "c", 3)),
+                    GenericRow.of(base)
+                });
+        assertThat(row.isNullAt(0)).isFalse();
+        InternalMap merged = row.getMap(0);
+        assertThat(merged.size()).isEqualTo(4);
+        assertThat(merged.keyArray().getString(0).toString()).isEqualTo("a");
+        assertThat(merged.valueArray().getInt(0)).isEqualTo(1);
+        assertThat(merged.keyArray().getString(1).toString()).isEqualTo("b");
+        assertThat(merged.valueArray().getInt(1)).isEqualTo(30);
+        assertThat(merged.keyArray().getString(2).toString()).isEqualTo("c");
+        assertThat(merged.keyArray().getString(3).toString()).isEqualTo("d");
+
+        // the merge is done once per row
+        assertThat(row.getMap(0)).isSameAs(merged);
+
+        // empty deltas return the base itself, without copying it
+        row.setRows(
+                new InternalRow[] {
+                    GenericRow.of(stringMap()), GenericRow.of(stringMap()), GenericRow.of(base)
+                });
+        assertThat(row.getMap(0)).isSameAs(base);
+
+        // a NULL base or a NULL delta is NULL
+        row.setRows(
+                new InternalRow[] {
+                    GenericRow.of(stringMap("x", 1)),
+                    GenericRow.of(stringMap()),
+                    GenericRow.of((Object) null)
+                });
+        assertThat(row.isNullAt(0)).isTrue();
+        row.setRows(
+                new InternalRow[] {
+                    GenericRow.of(stringMap("x", 1)),
+                    GenericRow.of((Object) null),
+                    GenericRow.of(base)
+                });
+        assertThat(row.isNullAt(0)).isTrue();
+    }
+
+    @Test
+    public void testMapDeltaWithoutBaseIsNull() {
+        MapType type = DataTypes.MAP(DataTypes.STRING(), DataTypes.INT());
+        DataEvolutionRow row = new DataEvolutionRow(1, new int[] {-1}, new int[] {-1});
+        row.setMapDeltas(
+                new DataEvolutionRow.MapDeltaField[] {
+                    new DataEvolutionRow.MapDeltaField(type, -1, -1, new int[] {0}, new int[] {0})
+                });
+        row.setRows(new InternalRow[] {GenericRow.of(stringMap("a", 1))});
+        assertThat(row.isNullAt(0)).isTrue();
+    }
+
+    @Test
+    public void testMapDeltaMergesBinaryKeysByContent() {
+        MapType type = DataTypes.MAP(DataTypes.BYTES(), DataTypes.INT());
+        DataEvolutionRow row = new DataEvolutionRow(2, new int[] {-1}, new int[] {-1});
+        row.setMapDeltas(
+                new DataEvolutionRow.MapDeltaField[] {
+                    new DataEvolutionRow.MapDeltaField(type, 1, 0, new int[] {0}, new int[] {0})
+                });
+        Map<Object, Object> base = new LinkedHashMap<>();
+        base.put(new byte[] {1}, 1);
+        Map<Object, Object> delta = new LinkedHashMap<>();
+        delta.put(new byte[] {1}, 10);
+        delta.put(new byte[] {2}, 2);
+        row.setRows(
+                new InternalRow[] {
+                    GenericRow.of(new GenericMap(delta)), GenericRow.of(new GenericMap(base))
+                });
+
+        InternalMap merged = row.getMap(0);
+        assertThat(merged.size()).isEqualTo(2);
+        assertThat(merged.keyArray().getBinary(0)).containsExactly(1);
+        assertThat(merged.valueArray().getInt(0)).isEqualTo(10);
+        assertThat(merged.keyArray().getBinary(1)).containsExactly(2);
+        assertThat(merged.valueArray().getInt(1)).isEqualTo(2);
+    }
+
+    private static GenericMap stringMap(Object... kvs) {
+        Map<Object, Object> map = new LinkedHashMap<>();
+        for (int i = 0; i < kvs.length; i += 2) {
+            map.put(BinaryString.fromString((String) kvs[i]), kvs[i + 1]);
+        }
+        return new GenericMap(map);
     }
 }

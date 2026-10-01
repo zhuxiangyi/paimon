@@ -384,6 +384,64 @@ binary downgrade is unsafe once these files have been committed.
 
 :::
 
+### Map Deltas
+
+An update of a `MAP` column normally rewrites the whole map of every row in the
+touched range. When an update only merges entries into a top-level map column,
+set `data-evolution.map-delta.enabled = true` to write just those entries as a
+map delta. Written-column metadata lists such a column as usual and adds a
+marker `_MAP_DELTA_<column>` after the written columns, and readers merge the
+deltas, oldest first, into the latest file that stores the column whole. The
+merged value is exactly `map_concat(current, delta)` where the last value wins
+for a duplicated key: a `NULL` map or a `NULL` delta is `NULL`, an existing key
+keeps its position, and a row that is not updated writes an empty delta without
+reading the map. Compaction writes the merged maps whole again.
+
+In Spark, `MERGE INTO` writes a map delta when every clause that sets the column
+merges into it, and `spark.sql.mapKeyDedupPolicy` is `LAST_WIN` (with the
+default `EXCEPTION`, `map_concat` fails on a duplicated key, which a delta cannot
+detect). Other updates of the column are written whole.
+
+```sql
+SET spark.sql.mapKeyDedupPolicy = LAST_WIN;
+
+MERGE INTO target_table AS t
+USING feature_updates AS s
+ON t.id = s.id
+WHEN MATCHED THEN UPDATE SET t.features = map_concat(t.features, s.features);
+```
+
+In Flink, list the columns in the `map_delta_columns` argument of the
+`data_evolution_merge_into` procedure or action; their set values are merged
+into the current maps.
+
+Only maps whose keys are of type `STRING` (`VARCHAR`), `BYTES` (`VARBINARY`),
+`BOOLEAN`, an integer type or `DATE` can be written as deltas: engines compare
+other keys differently from how they are stored, for example floating point keys
+after normalizing `-0.0` and `NaN`, timestamps and decimals at their own
+precision, and fixed-length types after padding. A map column cannot be written as a delta together with columns stored
+in dedicated BLOB or vector files, and removing a key is not supported by a
+delta. Map deltas and nested-field evolution can be used together.
+
+Incremental and streaming reads see only the files added in their range: reading
+a map column fails when that range holds map deltas of it but not its whole
+value, read the table in batch mode or compact it first. A `MERGE INTO` that
+writes map deltas is not rebased onto row ranges changed by a concurrent
+compaction; its commit fails and the statement has to be run again.
+
+:::warning
+
+Upgrade every reader, writer, compactor, and maintenance job before enabling map
+deltas. Enable them with `ALTER TABLE`; a dynamic option cannot enable them, and
+the option cannot be disabled or removed afterwards. Older components cannot
+merge a map delta, so a binary downgrade is unsafe once these files have been
+committed: older Java versions fail on the marker when reading or compacting the
+map column, but older PyPaimon versions return the delta itself as the value of
+the map without an error. PyPaimon does not merge map deltas yet and rejects
+reading such a map column.
+
+:::
+
 ## Deletes
 
 Row-level deletes require `deletion-vectors.enabled = true`. A deletion vector

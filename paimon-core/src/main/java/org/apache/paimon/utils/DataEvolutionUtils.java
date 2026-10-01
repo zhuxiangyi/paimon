@@ -20,6 +20,7 @@ package org.apache.paimon.utils;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.schema.MapDeltaColumns;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.table.source.DataSplit;
@@ -173,6 +174,7 @@ public class DataEvolutionUtils {
             return ids;
         }
 
+        writeCols = MapDeltaColumns.toPhysical(schemaFields, writeCols);
         Map<String, DataField> byName = new HashMap<>();
         for (DataField field : schemaFields) {
             byName.put(field.name(), field);
@@ -254,6 +256,7 @@ public class DataEvolutionUtils {
         if (writeCols == null) {
             return nullWriteSchemaFields;
         }
+        writeCols = MapDeltaColumns.toPhysical(schemaFields, writeCols);
 
         if (nestedFieldEnabled) {
             Set<String> fieldNames =

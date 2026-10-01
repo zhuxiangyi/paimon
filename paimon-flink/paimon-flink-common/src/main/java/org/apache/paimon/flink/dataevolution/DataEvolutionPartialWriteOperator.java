@@ -20,7 +20,10 @@ package org.apache.paimon.flink.dataevolution;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.data.GenericMap;
+import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.data.JoinedRow;
 import org.apache.paimon.flink.sink.Committable;
 import org.apache.paimon.flink.utils.BoundedOneInputOperator;
 import org.apache.paimon.io.CompactIncrement;
@@ -36,6 +39,7 @@ import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.TableWriteImpl;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.InnerTableRead;
+import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.CloseableIterator;
 import org.apache.paimon.utils.CommitIncrement;
@@ -79,6 +83,13 @@ public class DataEvolutionPartialWriteOperator
     // data type excludes of _ROW_ID field.
     private final RowType writeType;
 
+    // map columns written as map deltas: a row that is not updated writes an empty delta, so the
+    // original values of these columns are not read
+    private final List<String> mapDeltaColumns;
+    // the original values read for the rows that are not updated
+    private final RowType originalType;
+    private final int originalRowIdIndex;
+
     // --------------------- transient fields ---------------------------
 
     private transient List<Committable> committables;
@@ -105,6 +116,15 @@ public class DataEvolutionPartialWriteOperator
             RowType sourceType,
             List<String> writePaths,
             Long baseSnapshotId) {
+        this(table, sourceType, writePaths, baseSnapshotId, Collections.emptyList());
+    }
+
+    public DataEvolutionPartialWriteOperator(
+            FileStoreTable table,
+            RowType sourceType,
+            List<String> writePaths,
+            Long baseSnapshotId,
+            List<String> mapDeltaColumns) {
         this.table = table.copy(dataEvolutionWriteOptions());
         this.baseSnapshotId = baseSnapshotId;
         this.nestedFieldEnabled = this.table.coreOptions().dataEvolutionNestedFieldEnabled();
@@ -116,6 +136,15 @@ public class DataEvolutionPartialWriteOperator
         // carries the table's field ids, so it is used directly as the read/data type.
         this.dataType = sourceType;
         this.rowIdIndex = this.dataType.getFieldIndex(SpecialFields.ROW_ID.name());
+        this.mapDeltaColumns = new ArrayList<>(mapDeltaColumns);
+        List<DataField> originalFields = new ArrayList<>();
+        for (DataField field : dataType.getFields()) {
+            if (!mapDeltaColumns.contains(field.name())) {
+                originalFields.add(field);
+            }
+        }
+        this.originalType = new RowType(originalFields);
+        this.originalRowIdIndex = originalType.getFieldIndex(SpecialFields.ROW_ID.name());
     }
 
     @Override
@@ -150,11 +179,12 @@ public class DataEvolutionPartialWriteOperator
         firstRowIdLookup = new FirstRowIdLookup(new ArrayList<>(rowIdSet));
 
         // initialize table read & table write
-        tableRead = table.newRead().withReadType(dataType);
+        tableRead = table.newRead().withReadType(originalType);
         @SuppressWarnings("unchecked")
         TableWriteImpl<InternalRow> writeImpl =
                 (TableWriteImpl<InternalRow>)
                         table.newBatchWriteBuilder().newWrite().withWriteType(writeType);
+        writeImpl.withMapDeltaColumns(mapDeltaColumns);
         tableWrite = (AbstractFileStoreWrite<InternalRow>) (writeImpl.getWrite());
 
         committables = new ArrayList<>();
@@ -241,6 +271,10 @@ public class DataEvolutionPartialWriteOperator
         private final RecordWriter<InternalRow> writer;
 
         private final ProjectedRow reusedRow;
+        // an original row with an empty map delta for each map-delta column
+        private final ProjectedRow reusedOriginalRow;
+        private final JoinedRow reusedJoinedRow;
+        private final GenericRow emptyMapDeltas;
         private final long firstRowId;
         private final long rowCount;
         private final BinaryRow partition;
@@ -256,6 +290,14 @@ public class DataEvolutionPartialWriteOperator
             this.reader = reader.toCloseableIterator();
             this.writer = writer;
             this.reusedRow = ProjectedRow.from(writeType, dataType);
+            List<DataField> joinedFields = new ArrayList<>(originalType.getFields());
+            this.emptyMapDeltas = new GenericRow(mapDeltaColumns.size());
+            for (int i = 0; i < mapDeltaColumns.size(); i++) {
+                joinedFields.add(dataType.getField(mapDeltaColumns.get(i)));
+                emptyMapDeltas.setField(i, new GenericMap(Collections.emptyMap()));
+            }
+            this.reusedOriginalRow = ProjectedRow.from(writeType, new RowType(joinedFields));
+            this.reusedJoinedRow = new JoinedRow();
             this.firstRowId = firstRowId;
             this.rowCount = rowCount;
             this.partition = firstIdToPartition.get(firstRowId);
@@ -277,12 +319,11 @@ public class DataEvolutionPartialWriteOperator
             InternalRow originalRow;
             while (reader.hasNext()) {
                 originalRow = reader.next();
-                long originalRowId = originalRow.getLong(rowIdIndex);
+                long originalRowId = originalRow.getLong(originalRowIdIndex);
 
                 if (originalRowId < currentRowId) {
                     // new row is absent, we should use the original row
-                    reusedRow.replaceRow(originalRow);
-                    writer.write(reusedRow);
+                    writer.write(original(originalRow));
                     writtenNum++;
                 } else if (originalRowId == currentRowId) {
                     // new row is present, we should use the new row
@@ -298,14 +339,18 @@ public class DataEvolutionPartialWriteOperator
             }
         }
 
+        private InternalRow original(InternalRow originalRow) {
+            reusedOriginalRow.replaceRow(reusedJoinedRow.replace(originalRow, emptyMapDeltas));
+            return reusedOriginalRow;
+        }
+
         private Committable finish() throws Exception {
             // 1. write remaining original rows
             try {
                 InternalRow row;
                 while (reader.hasNext()) {
                     row = reader.next();
-                    reusedRow.replaceRow(row);
-                    writer.write(reusedRow);
+                    writer.write(original(row));
                     writtenNum++;
                 }
             } finally {

@@ -49,6 +49,7 @@ import org.apache.paimon.reader.FileRecordReader;
 import org.apache.paimon.reader.ReadBatchSizer;
 import org.apache.paimon.reader.ReaderSupplier;
 import org.apache.paimon.reader.RecordReader;
+import org.apache.paimon.schema.MapDeltaColumns;
 import org.apache.paimon.schema.SchemaEvolutionUtil;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.schema.TableSchema;
@@ -61,6 +62,7 @@ import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.FileStorePathFactory;
 import org.apache.paimon.utils.FormatReaderMapping;
 import org.apache.paimon.utils.FormatReaderMapping.Builder;
+import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.Preconditions;
 import org.apache.paimon.utils.Range;
 import org.apache.paimon.utils.RangeHelper;
@@ -122,6 +124,8 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
     // mapping, so it must not share entries with the merge path, which pushes none.
     private final Map<SingleFileKey, FormatReaderMapping> singleFileReaderMappings;
     private final Function<Long, TableSchema> schemaFetcher;
+    // map delta field ids by the schema id and write columns of a file
+    private final Map<Pair<Long, List<String>>, Set<Integer>> mapDeltaFieldIds;
     private final CoreOptions coreOptions;
     private final boolean fileIndexReadEnabled;
 
@@ -146,6 +150,7 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
         this.pathFactory = pathFactory;
         this.formatReaderMappings = new HashMap<>();
         this.singleFileReaderMappings = new HashMap<>();
+        this.mapDeltaFieldIds = new HashMap<>();
         this.fileIndexReadEnabled = coreOptions.fileIndexReadEnabled();
         this.readRowType = rowType;
     }
@@ -228,10 +233,13 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
         // the suppliers below run lazily, so take the filters now, the same way the read type is
         // already taken by the caller
         List<Predicate> filters = readTypeFilters(this.filters, readRowType);
+        // a delta or changelog read only sees the files added in its range
+        boolean incremental = dataSplit.isStreaming();
 
         List<List<DataFileMeta>> splitByRowId = mergeRangesAndSort(files);
         for (List<DataFileMeta> needMergeFiles : splitByRowId) {
-            if (needMergeFiles.size() == 1 || readRowType.getFields().isEmpty()) {
+            if ((needMergeFiles.size() == 1 && !readsMapDeltas(needMergeFiles.get(0), readRowType))
+                    || readRowType.getFields().isEmpty()) {
                 // No need to merge fields, just create a single file reader
                 suppliers.add(
                         () -> {
@@ -273,7 +281,8 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
                                     dataFilePathFactory,
                                     rowRanges,
                                     readRowType,
-                                    deletionVector);
+                                    deletionVector,
+                                    incremental);
                         });
             }
         }
@@ -296,7 +305,8 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
             DataFilePathFactory dataFilePathFactory,
             List<Range> rowRanges,
             RowType readRowType,
-            @Nullable DeletionVectorWithRange deletionVector)
+            @Nullable DeletionVectorWithRange deletionVector,
+            boolean incremental)
             throws IOException {
         List<DataEvolutionVectorReadPlanner.ReadRange> vectorRanges =
                 DataEvolutionVectorReadPlanner.plan(
@@ -341,7 +351,8 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
                                         dataFilePathFactory,
                                         readRanges,
                                         readRowType,
-                                        deletionVector));
+                                        deletionVector,
+                                        incremental));
             }
             return ConcatRecordReader.create(suppliers);
         }
@@ -365,7 +376,8 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
                 dataFilePathFactory,
                 rowRanges,
                 readRowType,
-                deletionVector);
+                deletionVector,
+                incremental);
     }
 
     private RecordReader<InternalRow> createUnionReader(
@@ -375,7 +387,8 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
             DataFilePathFactory dataFilePathFactory,
             List<Range> rowRanges,
             RowType readRowType,
-            @Nullable DeletionVectorWithRange deletionVector)
+            @Nullable DeletionVectorWithRange deletionVector,
+            boolean incremental)
             throws IOException {
 
         long rowCount = fieldsFiles.get(0).rowCount();
@@ -402,14 +415,24 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
 
         TableSchema[] bunchDataSchemas = new TableSchema[numBunches];
         List<RowType> bunchAvailTypes = new ArrayList<>(numBunches);
+        List<Set<Integer>> bunchMapDeltaFieldIds = new ArrayList<>(numBunches);
         for (int i = 0; i < numBunches; i++) {
             DataFileMeta first = fieldsFiles.get(i).files().get(0);
             bunchDataSchemas[i] =
                     schemaFetcher.apply(first.schemaId()).dataFileSchema(first.writeCols());
             bunchAvailTypes.add(rowTypeWithRowTracking(bunchDataSchemas[i].logicalRowType()));
+            bunchMapDeltaFieldIds.add(
+                    fieldsFiles.get(i) instanceof DataBunch
+                            ? mapDeltaFieldIds(first)
+                            : Collections.emptySet());
         }
         DataEvolutionReadPlanner.DataEvolutionReadPlan plan =
-                new DataEvolutionReadPlanner(readRowType, bunchAvailTypes, nestedFieldEnabled)
+                new DataEvolutionReadPlanner(
+                                readRowType,
+                                bunchAvailTypes,
+                                nestedFieldEnabled,
+                                bunchMapDeltaFieldIds,
+                                incremental)
                         .plan();
         if (plan.bunchReadFields.stream().allMatch(List::isEmpty)) {
             // For example, a newly added vector column may cover only part of the normal file's
@@ -467,11 +490,12 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
                                     deletionVector));
         }
 
-        return nestedFieldEnabled
-                ? new DataEvolutionFileReader(
-                        plan.rowOffsets, plan.fieldOffsets, fileRecordReaders, plan.nested)
-                : new DataEvolutionFileReader(
-                        plan.rowOffsets, plan.fieldOffsets, fileRecordReaders);
+        return new DataEvolutionFileReader(
+                plan.rowOffsets,
+                plan.fieldOffsets,
+                fileRecordReaders,
+                nestedFieldEnabled ? plan.nested : null,
+                plan.hasMapDeltas() ? plan.mapDeltas : null);
     }
 
     private RecordReader<InternalRow> createMissingFieldsReader(
@@ -501,6 +525,30 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
                 rowRanges,
                 readRowType,
                 deletionVector);
+    }
+
+    /**
+     * Whether {@code file} stores a map delta of a read field. Such a file alone still needs the
+     * merge path: without a base its map deltas read as {@code null}.
+     */
+    private boolean readsMapDeltas(DataFileMeta file, RowType readRowType) {
+        for (int fieldId : mapDeltaFieldIds(file)) {
+            if (readRowType.containsField(fieldId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Set<Integer> mapDeltaFieldIds(DataFileMeta file) {
+        if (!MapDeltaColumns.mayContainDeltas(file.writeCols())) {
+            return Collections.emptySet();
+        }
+        return mapDeltaFieldIds.computeIfAbsent(
+                Pair.of(file.schemaId(), file.writeCols()),
+                key ->
+                        MapDeltaColumns.deltaFieldIds(
+                                schemaFetcher.apply(key.getLeft()), key.getRight()));
     }
 
     private boolean nestedFieldEnabledFor(List<DataFileMeta> files) {
@@ -851,6 +899,8 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
             return Collections.emptyList();
         }
 
+        // A map delta needs no exclusion here: no file index supports a MAP column, and predicates
+        // on map keys (m[k]) are not read fields, so readTypeFilters has already dropped them.
         List<FileIndexResultEntry> results = new ArrayList<>();
         Set<Integer> claimedFieldIds = new HashSet<>();
         for (DataFileMeta file : files) {

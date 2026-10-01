@@ -84,6 +84,15 @@ class BlobNativeCoveringFilesTest(unittest.TestCase):
         self.assertIsNotNone(got)
         self.assertEqual([f.file_name for f in got], ["data-a.parquet", "data-b.parquet"])
 
+    def test_map_delta_file_returns_none(self):
+        # a map delta must be merged into its base by pypaimon's reader
+        files = self._files(
+            ("data-a.parquet", ["id", "m"], 0, 4),
+            ("data-a.blob", ["content"], 0, 4),
+            ("data-a-delta.parquet", ["m", "_MAP_DELTA_m"], 0, 4),
+        )
+        self.assertIsNone(self.call(files, ["id", "m"]))
+
     def test_blob_column_projected_returns_none(self):
         files = self._files(
             ("data-a.parquet", ["id", "name"], 0, 4),

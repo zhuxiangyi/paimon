@@ -1646,6 +1646,28 @@ public class SchemaValidation {
                     CoreOptions.DATA_EVOLUTION_ENABLED.key());
         }
 
+        if (options.dataEvolutionMapDeltaEnabled()) {
+            checkArgument(
+                    options.dataEvolutionEnabled(),
+                    "%s requires %s=true.",
+                    CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key(),
+                    CoreOptions.DATA_EVOLUTION_ENABLED.key());
+            RowType rowType = new RowType(schema.fields());
+            for (DataField field : schema.fields()) {
+                if (field.type() instanceof MapType) {
+                    String deltaColumn = MapDeltaColumns.encode(field.name());
+                    checkArgument(
+                            !rowType.containsField(deltaColumn),
+                            "%s cannot be enabled for a table containing both the map column '%s' "
+                                    + "and a column named '%s', which is how a map delta of it is "
+                                    + "recorded. Rename one of the two columns.",
+                            CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key(),
+                            field.name(),
+                            deltaColumn);
+                }
+            }
+        }
+
         List<DataField> fields = schema.fields();
         List<String> blobNames =
                 fields.stream()

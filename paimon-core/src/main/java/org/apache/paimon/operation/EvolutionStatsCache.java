@@ -20,6 +20,7 @@ package org.apache.paimon.operation;
 
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.schema.MapDeltaColumns;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
@@ -30,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
 
 import static org.apache.paimon.utils.Preconditions.checkNotNull;
@@ -57,9 +59,11 @@ class EvolutionStatsCache {
 
     private static ProjectedFileSchema projectFileSchema(
             Function<Long, TableSchema> scanTableSchema, CacheKey key) {
-        TableSchema dataFileSchema =
-                scanTableSchema.apply(key.schemaId).dataFileSchema(key.writeColumns);
+        TableSchema schema = scanTableSchema.apply(key.schemaId);
+        TableSchema dataFileSchema = schema.dataFileSchema(key.writeColumns);
         TableSchema dataFileSchemaWithStats = dataFileSchema.project(key.valueStatsColumns);
+        // the stats of a map delta describe the merged entries, not the value of the column
+        Set<Integer> mapDeltaFieldIds = MapDeltaColumns.deltaFieldIds(schema, key.writeColumns);
         List<DataField> fields = dataFileSchema.fields();
         Map<Integer, FileFieldStats> fieldStats = new HashMap<>(fields.size() * 2);
         for (DataField field : fields) {
@@ -68,7 +72,9 @@ class EvolutionStatsCache {
         List<DataField> statsFields = dataFileSchemaWithStats.fields();
         for (int i = 0; i < statsFields.size(); i++) {
             DataField statsField = statsFields.get(i);
-            fieldStats.put(statsField.id(), FileFieldStats.withStats(i, statsField.type()));
+            if (!mapDeltaFieldIds.contains(statsField.id())) {
+                fieldStats.put(statsField.id(), FileFieldStats.withStats(i, statsField.type()));
+            }
         }
         return new ProjectedFileSchema(dataFileSchema, fieldStats);
     }

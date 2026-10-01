@@ -25,6 +25,7 @@ from pypaimon.manifest.manifest_list_manager import ManifestListManager
 from pypaimon.manifest.index_manifest_file import IndexManifestFile
 from pypaimon.manifest.schema.data_file_meta import DataFileMeta
 from pypaimon.manifest.schema.file_entry import FileEntry
+from pypaimon.schema.map_delta_columns import decode_map_delta
 from pypaimon.table.special_fields import SpecialFields
 from pypaimon.utils.range import Range
 from pypaimon.utils.range_helper import RangeHelper
@@ -43,6 +44,7 @@ class RowIdColumnConflictChecker:
         self._write_ranges = write_ranges
         self._schema_manager = schema_manager
         self._field_id_cache = {}
+        self._map_delta_cache = {}
 
     @classmethod
     def from_data_files(cls, schema_manager, delta_files):
@@ -118,9 +120,20 @@ class RowIdColumnConflictChecker:
         name_to_id = self._field_id_by_name(file.schema_id)
         fid = name_to_id.get(col_name)
         if fid is None:
+            # a map delta written by the Java writer updates the map it merges into
+            fid = self._map_delta_field_id(file.schema_id, col_name)
+        if fid is None:
             raise RuntimeError(
                 f"Column '{col_name}' not found in schema {file.schema_id}")
         return fid
+
+    def _map_delta_field_id(self, schema_id, col_name):
+        key = (schema_id, col_name)
+        if key not in self._map_delta_cache:
+            map_field = decode_map_delta(
+                self._schema_manager.get_schema(schema_id).fields, col_name)
+            self._map_delta_cache[key] = map_field.id if map_field is not None else None
+        return self._map_delta_cache[key]
 
     def _field_id_by_name(self, schema_id):
         if schema_id not in self._field_id_cache:

@@ -712,6 +712,84 @@ public class DataEvolutionFileStoreScanTest {
     }
 
     @Test
+    public void testEvolutionStatsKeepMapDeltaFieldAsUnknown() {
+        Schema schema =
+                Schema.newBuilder()
+                        .column("id", DataTypes.INT())
+                        .column("m", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        .build();
+        TableSchema tableSchema = TableSchema.create(0L, schema);
+        schemas.put(0L, tableSchema);
+
+        // every value of the base is NULL
+        ManifestEntry baseEntry =
+                createManifestEntryWithDifferentColsAndFileName(
+                        "base-file.parquet",
+                        0L,
+                        new String[] {"id", "m"},
+                        new String[] {"id", "m"},
+                        createSimpleStats(
+                                GenericRow.of(1, null),
+                                GenericRow.of(5, null),
+                                createBinaryArray(new int[] {0, 100}),
+                                new int[] {0, 2}),
+                        0L);
+        // a newer map delta has no NULL value, which does not make the merged values non-NULL
+        ManifestEntry deltaEntry =
+                createManifestEntryWithDifferentColsAndFileName(
+                        "delta-file.parquet",
+                        0L,
+                        new String[] {"m", "_MAP_DELTA_m"},
+                        new String[] {"m"},
+                        createSimpleStats(
+                                GenericRow.of((Object) null),
+                                GenericRow.of((Object) null),
+                                createBinaryArray(new int[] {0}),
+                                new int[] {2}),
+                        1L);
+
+        EvolutionStats result =
+                DataEvolutionFileStoreScan.evolutionStats(
+                        tableSchema,
+                        scanTableSchema,
+                        Arrays.asList(deltaEntry, baseEntry),
+                        new EvolutionStatsCache());
+
+        DataEvolutionArray nullCounts = (DataEvolutionArray) result.nullCounts();
+        assertThat(nullCounts.getLong(0)).isEqualTo(0L);
+        assertThat(nullCounts.isNullAt(1)).isTrue();
+        Predicate predicate = new PredicateBuilder(tableSchema.logicalRowType()).isNull(1);
+        assertThat(
+                        predicate.test(
+                                result.rowCount(),
+                                result.minValues(),
+                                result.maxValues(),
+                                result.nullCounts()))
+                .isTrue();
+
+        // once a file stores the column whole again, its stats apply
+        ManifestEntry wholeEntry =
+                createManifestEntryWithDifferentColsAndFileName(
+                        "whole-file.parquet",
+                        0L,
+                        new String[] {"m"},
+                        new String[] {"m"},
+                        createSimpleStats(
+                                GenericRow.of((Object) null),
+                                GenericRow.of((Object) null),
+                                createBinaryArray(new int[] {0}),
+                                new int[] {2}),
+                        2L);
+        result =
+                DataEvolutionFileStoreScan.evolutionStats(
+                        tableSchema,
+                        scanTableSchema,
+                        Arrays.asList(wholeEntry, deltaEntry, baseEntry),
+                        new EvolutionStatsCache());
+        assertThat(result.nullCounts().getLong(1)).isEqualTo(0L);
+    }
+
+    @Test
     public void testIntersectsRowRanges() {
         List<Range> rowRanges =
                 Arrays.asList(

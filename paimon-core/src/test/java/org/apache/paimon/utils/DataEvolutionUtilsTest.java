@@ -175,6 +175,29 @@ public class DataEvolutionUtilsTest {
     }
 
     @Test
+    public void testMapDeltaWriteColumnResolvesToItsMap() {
+        TableSchema schema =
+                tableSchema(
+                        1L,
+                        new DataField(1, "id", DataTypes.INT()),
+                        new DataField(2, "m", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
+                        new DataField(3, "c", DataTypes.STRING()));
+        DataFileMeta file = dataFile("delta.parquet", 1L, Arrays.asList("c", "m", "_MAP_DELTA_m"));
+
+        for (boolean nested : Arrays.asList(false, true)) {
+            assertThat(DataEvolutionUtils.fileFieldIds(schema.fields(), file, nested))
+                    .containsExactlyInAnyOrder(2, 3);
+            // physical order of the file
+            assertThat(DataEvolutionUtils.fileFields(schema.fields(), file, nested))
+                    .extracting(DataField::id)
+                    .containsExactly(3, 2);
+        }
+        assertThat(DataEvolutionUtils.fileFieldIds(schema, file)).containsExactlyInAnyOrder(2, 3);
+        // strict resolution accepts the map delta
+        assertThat(collectWrittenColumnIds(ignored -> schema, file)).hasValue(Arrays.asList(2, 3));
+    }
+
+    @Test
     public void testCollectWrittenColumnIdsAcrossSchemas() {
         Map<Long, TableSchema> schemas = new HashMap<>();
         schemas.put(

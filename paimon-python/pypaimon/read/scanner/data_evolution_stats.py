@@ -22,6 +22,7 @@ from pypaimon.manifest.schema.data_file_meta import DataFileMeta
 from pypaimon.manifest.schema.simple_stats import SimpleStats
 from pypaimon.read.push_down_utils import rewrite_predicate_indices
 from pypaimon.schema.data_types import DataField
+from pypaimon.schema.map_delta_columns import map_delta_fields, to_physical
 from pypaimon.table.special_fields import SpecialFields
 from pypaimon.table.row.generic_row import GenericRow
 
@@ -186,16 +187,22 @@ class DataEvolutionGroupStatsFilter:
             if file.write_cols is None
             and hasattr(schema, 'data_file_fields')
             else self._project_fields(
-                schema_fields, fields_by_name, file.write_cols)
+                schema_fields, fields_by_name,
+                None if file.write_cols is None
+                else to_physical(schema_fields, file.write_cols))
         )
         stats_fields = self._project_fields(
             data_fields,
             {field.name: field for field in data_fields},
             file.value_stats_cols,
         )
+        # the stats of a map delta describe the merged entries, not the value of the map
+        delta_ids = {
+            field.id for field in map_delta_fields(schema_fields, file.write_cols).values()}
         layout = _FileLayout(
             data_fields,
-            {field.id: index for index, field in enumerate(stats_fields)},
+            {field.id: index for index, field in enumerate(stats_fields)
+             if field.id not in delta_ids},
         )
         self._layout_cache[key] = layout
         return layout

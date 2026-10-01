@@ -21,6 +21,7 @@ package org.apache.paimon.stats;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateBuilder;
 import org.apache.paimon.schema.IndexCastMapping;
+import org.apache.paimon.schema.MapDeltaColumns;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
 
@@ -79,10 +80,12 @@ public class SimpleStatsEvolutions {
                     // Project data fields to write cols for data evolution table
                     if (k.writeCols != null) {
                         RowType rowType = new RowType(dataFields);
-                        // writeCols may contain some metadata fields i.e. row_id & max_seq
+                        // writeCols may contain some metadata fields i.e. row_id & max_seq, and
+                        // record a map delta under a name that is not the physical column name
                         dataFields =
                                 rowType.project(
-                                                k.writeCols.stream()
+                                                MapDeltaColumns.toPhysical(rowType, k.writeCols)
+                                                        .stream()
                                                         .filter(rowType::containsField)
                                                         .collect(Collectors.toList()))
                                         .getFields();

@@ -43,6 +43,7 @@ from pypaimon.read.split_read import (DataEvolutionSplitRead,
                                       SplitRead, deferred_blob_field_names)
 from pypaimon.schema.data_types import (
     DataField, MapType, PyarrowFieldParser, is_map_blob_type)
+from pypaimon.schema.map_delta_columns import MAP_DELTA_PREFIX
 from pypaimon.table.row.offset_row import OffsetRow
 
 ROW_KIND_COLUMN = "_row_kind"
@@ -749,6 +750,12 @@ class TableRead:
             if ('.vector.' not in file_name
                     and not file_name.endswith(_NATIVE_READ_FILE_SUFFIXES)
                     and not file_name.endswith(_NATIVE_BLOB_FILE_SUFFIX)):
+                return False
+            # The native reader cannot merge map deltas; the Python reader rejects reading
+            # them, a column merely named like one only loses the native path.
+            write_cols = data_file.write_cols
+            if isinstance(write_cols, (list, tuple)) and any(
+                    col.startswith(MAP_DELTA_PREFIX) for col in write_cols):
                 return False
         return True
 
