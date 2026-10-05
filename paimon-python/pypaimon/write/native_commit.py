@@ -20,6 +20,7 @@
 from importlib import import_module
 
 from pypaimon.common.json_util import JSON
+from pypaimon.schema.map_delta_columns import may_have_map_deltas
 from pypaimon.read.native_plan import (
     _catalog_context_options, _catalog_metastore, _option_value_to_string,
     _resolved_schema_file_io_options)
@@ -65,7 +66,9 @@ def native_messages_supported(table, messages) -> bool:
 
 def create_native_commit(table, commit_user, overwrite_partition=None):
     """Return a native committer only when its publication protocol matches Python."""
-    if not _rest_catalog_supported(table) or not native_commit_available():
+    # Rust checks row-id conflicts by write columns, which do not know map-delta markers
+    if (not _rest_catalog_supported(table) or not native_commit_available()
+            or may_have_map_deltas(table)):
         return None
     native_table = create_native_write_table(table)
     if native_table is None:

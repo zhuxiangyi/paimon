@@ -32,6 +32,7 @@ from pypaimon.schema.data_types import (ArrayType, AtomicInteger, DataField,
                                         is_array_blob_type, is_blob_file_field,
                                         is_blob_file_type, is_blob_type,
                                         is_map_blob_type, reassign_field_id)
+from pypaimon.schema.map_delta_columns import check_map_delta_option_change
 from pypaimon.schema.schema import Schema
 from pypaimon.schema.schema_change import (AddColumn, DropColumn, RemoveOption,
                                            RenameColumn, SchemaChange,
@@ -790,12 +791,16 @@ class SchemaManager:
                     raise ValueError(f"Change '{change.key}' is not supported yet.")
                 if change.key in CoreOptions.IMMUTABLE_OPTIONS and _has_snapshots():
                     raise ValueError(f"Change '{change.key}' is not supported yet.")
+                check_map_delta_option_change(
+                    change.key, old_value, change.value, dynamic=False)
                 new_options[change.key] = change.value
             elif isinstance(change, RemoveOption):
                 if change.key == "type":
                     raise ValueError(f"Change '{change.key}' is not supported yet.")
                 if change.key in CoreOptions.IMMUTABLE_OPTIONS and _has_snapshots():
                     raise ValueError(f"Change '{change.key}' is not supported yet.")
+                check_map_delta_option_change(
+                    change.key, new_options.get(change.key), None, dynamic=False)
                 new_options.pop(change.key, None)
             elif isinstance(change, UpdateComment):
                 new_comment = change.comment

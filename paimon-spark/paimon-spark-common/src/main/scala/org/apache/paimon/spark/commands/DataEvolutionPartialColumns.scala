@@ -18,14 +18,18 @@
 
 package org.apache.paimon.spark.commands
 
+import org.apache.paimon.io.DataFileMeta
+import org.apache.paimon.schema.{MapDeltaColumns, TableSchema}
 import org.apache.paimon.spark.SparkTypeUtils
 import org.apache.paimon.table.FileStoreTable
+import org.apache.paimon.utils.DataEvolutionUtils
 
 import org.apache.spark.sql.Column
 import org.apache.spark.sql.functions.{col, lit, struct, when}
 import org.apache.spark.sql.types.StructType
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 
 /**
  * Helpers for the conflict rewriters, which have to read and re-write the exact columns a
@@ -39,6 +43,32 @@ private[spark] class DataEvolutionPartialColumns(table: FileStoreTable) {
     table.coreOptions().dataEvolutionNestedFieldEnabled()
 
   private lazy val fieldNames = table.rowType().getFieldNames.asScala.toSet
+
+  private val fileSchemaCache = mutable.HashMap.empty[Long, TableSchema]
+
+  /** The schema `file` was written with. */
+  def fileSchema(file: DataFileMeta): TableSchema = {
+    fileSchemaCache.getOrElseUpdate(
+      file.schemaId(),
+      if (file.schemaId() == table.schema().id()) table.schema()
+      else table.schemaManager().schema(file.schemaId()))
+  }
+
+  /**
+   * The write columns of a partial-column file, `None` for a file of all columns. They include the
+   * markers of map deltas, see [[hasMapDeltas]]: a file with map deltas cannot be rewritten.
+   */
+  def partialFileWriteCols(file: DataFileMeta): Option[Seq[String]] = {
+    val columns = DataEvolutionUtils.partialFileWriteCols(fileSchema(file), file)
+    if (columns.isPresent) Some(columns.get().asScala.toSeq) else None
+  }
+
+  /**
+   * Whether `file` stores map deltas, see [[MapDeltaColumns]]. A map delta only holds the entries
+   * merged into a row, so it cannot be rebased onto other values like a column written whole.
+   */
+  def hasMapDeltas(file: DataFileMeta): Boolean =
+    MapDeltaColumns.hasDeltas(fileSchema(file), file.writeCols())
 
   /**
    * The top-level column a write path addresses. A path that names a field exactly is that field

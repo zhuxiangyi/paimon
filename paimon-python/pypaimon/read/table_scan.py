@@ -29,6 +29,7 @@ from pypaimon.read.plan import Plan
 from pypaimon.read.query_auth_split import resolve_auth_result, wrap_plan_with_auth
 from pypaimon.read.scan_stats import ScanStats
 from pypaimon.read.scanner.file_scanner import FileScanner
+from pypaimon.schema.map_delta_columns import may_have_map_deltas
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,9 @@ class TableScan:
             if not database_name or database_name == UNKNOWN_DATABASE:
                 return False
         if self.table.options.query_auth_enabled:
+            return False
+        # Rust would prune by the stats of map deltas as if they were whole maps
+        if may_have_map_deltas(self.table):
             return False
         # Rust rejects schemas whose primary keys are all partition keys.
         if getattr(self.table, 'is_primary_key_table', False) \

@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link MapDeltaColumns}. */
 class MapDeltaColumnsTest {
@@ -154,6 +155,79 @@ class MapDeltaColumnsTest {
         assertThat(MapDeltaColumns.hasDeltas(schema, Arrays.asList("s", "_MAP_DELTA_m"))).isFalse();
         assertThat(MapDeltaColumns.deltaFieldIds(schema, Arrays.asList("m", "s"))).isEmpty();
         assertThat(MapDeltaColumns.deltaFieldIds(schema, null)).isEmpty();
+    }
+
+    @Test
+    void testValidate() {
+        Map<String, String> enabled = new HashMap<>();
+        enabled.put(CoreOptions.DATA_EVOLUTION_ENABLED.key(), "true");
+        enabled.put(CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key(), "true");
+        CoreOptions options = CoreOptions.fromMap(enabled);
+        RowType writeType = ROW_TYPE.project(Arrays.asList("id", "m", "a.b", "s"));
+
+        MapDeltaColumns.validate(ROW_TYPE, writeType, Arrays.asList("m", "a.b"), options);
+        // nothing to check without columns, even if the option is disabled
+        MapDeltaColumns.validate(
+                ROW_TYPE, writeType, Collections.emptyList(), new CoreOptions(new HashMap<>()));
+
+        for (String disabled :
+                Arrays.asList(
+                        CoreOptions.DATA_EVOLUTION_ENABLED.key(),
+                        CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key())) {
+            Map<String, String> without = new HashMap<>(enabled);
+            without.remove(disabled);
+            assertThatThrownBy(
+                            () ->
+                                    MapDeltaColumns.validate(
+                                            ROW_TYPE,
+                                            writeType,
+                                            Collections.singletonList("m"),
+                                            CoreOptions.fromMap(without)))
+                    .isInstanceOf(UnsupportedOperationException.class)
+                    .hasMessageContaining(disabled);
+        }
+        // not written, unknown and not a map
+        assertThatThrownBy(() -> validate(writeType, "x", options))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("'x' is not a column updated as a whole");
+        assertThatThrownBy(() -> validate(writeType, "missing", options))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("'missing' is not a column updated as a whole");
+        assertThatThrownBy(() -> validate(writeType, "s", options))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("'s' is not a map column but STRING");
+
+        // keys without value equality
+        RowType doubleKeys =
+                RowType.of(
+                        new DataField(0, "dm", DataTypes.MAP(DataTypes.DOUBLE(), DataTypes.INT())));
+        assertThatThrownBy(() -> validate(doubleKeys, "dm", options, doubleKeys))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessageContaining("'dm' has keys of type DOUBLE");
+
+        // a column named like the marker of the map
+        RowType ambiguous = ROW_TYPE.project(Arrays.asList("x", "_MAP_DELTA_x"));
+        assertThatThrownBy(() -> validate(ambiguous, "x", options, ambiguous))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessageContaining("column named '_MAP_DELTA_x'");
+
+        // together with a column stored in blob files
+        RowType withBlob =
+                RowType.of(
+                        new DataField(0, "m", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
+                        new DataField(1, "b", DataTypes.BLOB()));
+        assertThatThrownBy(() -> validate(withBlob, "m", options, withBlob))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessageContaining("dedicated blob or vector files");
+    }
+
+    private static void validate(RowType writeType, String column, CoreOptions options) {
+        validate(writeType, column, options, ROW_TYPE);
+    }
+
+    private static void validate(
+            RowType writeType, String column, CoreOptions options, RowType tableType) {
+        MapDeltaColumns.validate(tableType, writeType, Collections.singletonList(column), options);
     }
 
     @Test

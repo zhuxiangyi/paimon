@@ -23,6 +23,7 @@ import org.apache.paimon.data.GenericMap;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.data.shredding.MapSelectedKeysMetadataUtils;
 import org.apache.paimon.operation.DataEvolutionReadPlanner.DataEvolutionReadPlan;
 import org.apache.paimon.reader.DataEvolutionRow;
 import org.apache.paimon.types.DataField;
@@ -537,6 +538,83 @@ class DataEvolutionReadPlannerTest {
                                         .plan())
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("is not null");
+    }
+
+    @Test
+    void testSelectedMapKeysCannotBeReadOverMapDeltas() {
+        // a read of selected keys of m: the id of m with a ROW type
+        DataField selected =
+                MapSelectedKeysMetadataUtils.withSelectedKeys(
+                        M,
+                        new RowType(
+                                Arrays.asList(
+                                        new DataField(0, "0", DataTypes.INT()),
+                                        new DataField(1, "1", DataTypes.INT()))),
+                        Arrays.asList("a", "b"));
+        RowType readType = new RowType(Arrays.asList(ID, selected));
+        for (boolean nestedFieldEnabled : Arrays.asList(false, true)) {
+            assertThatThrownBy(
+                            () ->
+                                    new DataEvolutionReadPlanner(
+                                                    readType,
+                                                    Arrays.asList(rowType(M), MAP_READ_TYPE),
+                                                    nestedFieldEnabled,
+                                                    Arrays.asList(ids(1), ids()),
+                                                    false)
+                                            .plan())
+                    .isInstanceOf(UnsupportedOperationException.class)
+                    .hasMessageContaining("Cannot read selected keys of map column 'm'");
+
+            // without a delta in effect, the selected keys are read from the latest whole value
+            DataEvolutionReadPlan plan =
+                    new DataEvolutionReadPlanner(
+                                    readType,
+                                    Arrays.asList(rowType(M), rowType(M), MAP_READ_TYPE),
+                                    nestedFieldEnabled,
+                                    Arrays.asList(ids(), ids(1), ids()),
+                                    false)
+                            .plan();
+            assertThat(plan.mapDeltas).containsOnlyNulls();
+            assertThat(plan.rowOffsets[1]).isEqualTo(0);
+        }
+    }
+
+    @Test
+    void testSelectedMapKeysAreReadWholeInBothPlanningModes() {
+        // id(0), c(1), attrs(2); the selected keys are ROW fields 0 and 1, which are no table
+        // fields
+        DataField c = new DataField(1, "c", DataTypes.STRING());
+        DataField attrs =
+                new DataField(2, "attrs", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()));
+        DataField selected =
+                MapSelectedKeysMetadataUtils.withSelectedKeys(
+                        attrs,
+                        new RowType(
+                                Arrays.asList(
+                                        new DataField(0, "0", DataTypes.INT()),
+                                        new DataField(1, "1", DataTypes.INT()))),
+                        Arrays.asList("k1", "k2"));
+        RowType readType = new RowType(Arrays.asList(ID, selected));
+        // latest first: a partial file of c, then the base storing every column
+        List<RowType> bunches = Arrays.asList(rowType(c), new RowType(Arrays.asList(ID, c, attrs)));
+        for (boolean nestedFieldEnabled : Arrays.asList(false, true)) {
+            DataEvolutionReadPlan plan =
+                    new DataEvolutionReadPlanner(
+                                    readType,
+                                    bunches,
+                                    nestedFieldEnabled,
+                                    Arrays.asList(ids(), ids()),
+                                    false)
+                            .plan();
+
+            assertThat(plan.rowOffsets).containsExactly(1, 1);
+            assertThat(plan.fieldOffsets).containsExactly(0, 1);
+            assertThat(plan.bunchReadFields.get(0)).isEmpty();
+            assertThat(plan.bunchReadFields.get(1)).containsExactly(ID, selected);
+            if (plan.nested != null) {
+                assertThat(plan.nested).containsOnlyNulls();
+            }
+        }
     }
 
     @Test

@@ -44,7 +44,6 @@ import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypeCasts;
 import org.apache.paimon.types.DataTypeFamily;
 import org.apache.paimon.types.DataTypeRoot;
-import org.apache.paimon.types.MapType;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.Preconditions;
 
@@ -918,51 +917,13 @@ public class DataEvolutionMergeIntoAction extends TableActionBase {
 
     /** Validates the map-delta columns against the SET targets. */
     private void checkMapDeltaColumns() {
-        if (mapDeltaColumns.isEmpty()) {
-            return;
-        }
-        if (!coreOptions.dataEvolutionMapDeltaEnabled()) {
-            throw new UnsupportedOperationException(
-                    "Map delta columns "
-                            + mapDeltaColumns
-                            + " require '"
-                            + CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key()
-                            + "=true'.");
-        }
-        RowType rowType = table.rowType();
-        for (String column : mapDeltaColumns) {
-            if (!writePaths.contains(column)) {
-                throw new IllegalArgumentException(
-                        String.format(
-                                "Map delta column '%s' is not a column updated as a whole by the "
-                                        + "matched update set.",
-                                column));
-            }
-            if (!(rowType.getField(column).type() instanceof MapType)) {
-                throw new IllegalArgumentException(
-                        String.format(
-                                "Map delta column '%s' is not a map column but %s.",
-                                column, rowType.getField(column).type()));
-            }
-            if (!MapDeltaColumns.supportsType(rowType.getField(column).type())) {
-                throw new IllegalArgumentException(
-                        String.format(
-                                "Map delta column '%s' has keys of type %s, which cannot be "
-                                        + "merged as map deltas.",
-                                column, ((MapType) rowType.getField(column).type()).getKeyType()));
-            }
-        }
         // fail before the job is submitted instead of in every writer
+        RowType rowType = table.rowType();
         RowType writeType =
                 nestedFieldEnabled
                         ? rowType.projectByPaths(writePaths)
                         : rowType.project(writePaths);
-        if (MapDeltaColumns.writesDedicatedFiles(rowType, writeType, coreOptions)) {
-            throw new UnsupportedOperationException(
-                    "Map delta columns cannot be written together with columns stored in "
-                            + "dedicated blob or vector files: "
-                            + writePaths);
-        }
+        MapDeltaColumns.validate(rowType, writeType, mapDeltaColumns, coreOptions);
     }
 
     /**

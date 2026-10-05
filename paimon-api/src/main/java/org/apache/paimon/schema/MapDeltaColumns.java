@@ -30,6 +30,7 @@ import org.apache.paimon.types.VectorType;
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -105,6 +106,63 @@ public final class MapDeltaColumns {
         return (tableHasBlobFiles && writesBlob)
                 || !VectorType.fieldNamesInVectorFile(writeType, options.withVectorFormat())
                         .isEmpty();
+    }
+
+    /**
+     * Checks that a write of {@code writeType} to a table of {@code tableType} can store {@code
+     * columns} as map deltas. Throws {@link IllegalArgumentException} for a column that is not a
+     * top-level map column of the write, and {@link UnsupportedOperationException} for a write the
+     * table or the column cannot store as map deltas.
+     */
+    public static void validate(
+            RowType tableType, RowType writeType, Collection<String> columns, CoreOptions options) {
+        if (columns.isEmpty()) {
+            return;
+        }
+        if (!options.dataEvolutionEnabled() || !options.dataEvolutionMapDeltaEnabled()) {
+            throw new UnsupportedOperationException(
+                    String.format(
+                            "Writing map deltas of %s requires %s=true and %s=true.",
+                            columns,
+                            CoreOptions.DATA_EVOLUTION_ENABLED.key(),
+                            CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key()));
+        }
+        for (String column : columns) {
+            if (!writeType.containsField(column) || !tableType.containsField(column)) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Map delta column '%s' is not a column updated as a whole by the "
+                                        + "write of %s.",
+                                column, writeType.getFieldNames()));
+            }
+            DataType type = writeType.getField(column).type();
+            if (!(type instanceof MapType)) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Map delta column '%s' is not a map column but %s.", column, type));
+            }
+            if (!supportsType(type)) {
+                throw new UnsupportedOperationException(
+                        String.format(
+                                "Map delta column '%s' has keys of type %s, which cannot be "
+                                        + "merged as map deltas.",
+                                column, ((MapType) type).getKeyType()));
+            }
+            if (tableType.containsField(encode(column))) {
+                throw new UnsupportedOperationException(
+                        String.format(
+                                "Cannot write a map delta of column '%s' because the table has a "
+                                        + "column named '%s', which is how the delta is recorded.",
+                                column, encode(column)));
+            }
+        }
+        if (writesDedicatedFiles(tableType, writeType, options)) {
+            throw new UnsupportedOperationException(
+                    String.format(
+                            "Map deltas cannot be written together with columns stored in "
+                                    + "dedicated blob or vector files: %s.",
+                            writeType.getFieldNames()));
+        }
     }
 
     /** The marker appended to the write columns of a file storing {@code column} as map deltas. */

@@ -188,6 +188,10 @@ abstract class PushDownMapSelectedKeysBase extends Rule[LogicalPlan] {
     }
 
     val options = CoreOptions.fromMap(scan.table.options())
+    // a map delta can only be merged into the whole map, which a selected-key read does not have
+    if (options.dataEvolutionEnabled() && options.dataEvolutionMapDeltaEnabled()) {
+      return false
+    }
     access.mapType match {
       case MapType(StringType, _, _) =>
         fieldType(scan.table.rowType(), access.fieldName) match {

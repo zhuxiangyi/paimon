@@ -19,7 +19,8 @@
 
 import pyarrow as pa
 
-from pypaimon.schema.data_types import PyarrowFieldParser
+from pypaimon.schema.data_types import MapType, PyarrowFieldParser
+from pypaimon.schema.map_delta_columns import may_have_map_deltas
 from pypaimon.snapshot.snapshot import BATCH_COMMIT_IDENTIFIER
 from pypaimon.snapshot.time_travel_util import SCAN_KEYS
 from pypaimon.table.file_store_table import FileStoreTable
@@ -38,6 +39,8 @@ def _native_row_id_table(table):
             or not table.options.data_evolution_enabled()
             or not table.options.row_tracking_enabled()
             or not _supports_parquet_row_id_update(table)
+            # Rust would read and rewrite map deltas as whole maps
+            or may_have_map_deltas(table)
             or any(table.options.options.contains_key(key) for key in SCAN_KEYS)
             or not native_write_available()):
         return None
@@ -166,7 +169,9 @@ def native_predicate_row_ids(scan_table, predicate, splits):
         _prepare_native_read, native_split_bridge_available,
         native_split_from_python,
     )
-    if not native_split_bridge_available():
+    # Rust would match a predicate on a map against its map deltas instead of the merged maps
+    if not native_split_bridge_available() or (
+            may_have_map_deltas(scan_table) and _references_map(scan_table, predicate)):
         return None
     reader = _prepare_native_read(
         scan_table, predicate=predicate, projection=['_ROW_ID']
@@ -176,6 +181,16 @@ def native_predicate_row_ids(scan_table, predicate, splits):
         for batch in reader([native_split_from_python(split)]):
             row_ids.extend(batch.column('_ROW_ID').to_pylist())
     return row_ids
+
+
+def _references_map(table, predicate):
+    """Whether ``predicate`` reads a top-level map column of ``table``."""
+    if predicate is None:
+        return False
+    from pypaimon.write.table_update import TableUpdate
+    maps = {field.name for field in table.fields if isinstance(field.type, MapType)}
+    return any(name in maps or name.split('.', 1)[0] in maps
+               for name in TableUpdate._predicate_fields(predicate))
 
 
 def create_native_delete(table, commit_user):

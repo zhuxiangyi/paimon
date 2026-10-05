@@ -421,7 +421,9 @@ other keys differently from how they are stored, for example floating point keys
 after normalizing `-0.0` and `NaN`, timestamps and decimals at their own
 precision, and fixed-length types after padding. A map column cannot be written as a delta together with columns stored
 in dedicated BLOB or vector files, and removing a key is not supported by a
-delta. Map deltas and nested-field evolution can be used together.
+delta. Map deltas and nested-field evolution can be used together. A selected
+key of a `shared-shredding` map (`m['k']`) is not pushed down to the scan of a
+table with map deltas enabled: the whole map is read to merge the deltas.
 
 Incremental and streaming reads see only the files added in their range: reading
 a map column fails when that range holds map deltas of it but not its whole
@@ -438,7 +440,8 @@ merge a map delta, so a binary downgrade is unsafe once these files have been
 committed: older Java versions fail on the marker when reading or compacting the
 map column, but older PyPaimon versions return the delta itself as the value of
 the map without an error. PyPaimon does not merge map deltas yet and rejects
-reading such a map column.
+reading such a map column, and it keeps a table with map deltas enabled on its
+Python planning, update, delete and commit paths instead of the native ones.
 
 :::
 

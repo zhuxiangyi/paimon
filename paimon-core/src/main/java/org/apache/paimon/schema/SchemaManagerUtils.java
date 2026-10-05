@@ -24,6 +24,7 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
+import org.apache.paimon.options.ConfigOption;
 import org.apache.paimon.schema.ColumnDirectiveUtils.ConvertedColumn;
 import org.apache.paimon.schema.SchemaChange.AddColumn;
 import org.apache.paimon.schema.SchemaChange.DropColumn;
@@ -99,6 +100,12 @@ import static org.apache.paimon.utils.Preconditions.checkState;
 
 /** Utilities shared by schema manager implementations. */
 final class SchemaManagerUtils {
+
+    /** Boolean table options that can be enabled on an existing table but never disabled. */
+    private static final List<ConfigOption<Boolean>> ONE_WAY_ENABLED_OPTIONS =
+            Arrays.asList(
+                    CoreOptions.DATA_EVOLUTION_NESTED_FIELD_ENABLED,
+                    CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED);
 
     private SchemaManagerUtils() {}
 
@@ -1047,27 +1054,15 @@ final class SchemaManagerUtils {
                     String.format("Change '%s' is not supported yet.", key));
         }
 
-        if (CoreOptions.DATA_EVOLUTION_NESTED_FIELD_ENABLED.key().equals(key)) {
-            boolean oldEnabled =
-                    oldValue == null
-                            ? CoreOptions.DATA_EVOLUTION_NESTED_FIELD_ENABLED.defaultValue()
-                            : Boolean.parseBoolean(oldValue);
-            boolean newEnabled = Boolean.parseBoolean(newValue);
-            if (oldEnabled && !newEnabled) {
-                throw new UnsupportedOperationException(
-                        String.format("Cannot disable table option '%s'.", key));
-            }
-        }
-
-        if (CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key().equals(key)) {
-            boolean oldEnabled =
-                    oldValue == null
-                            ? CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.defaultValue()
-                            : Boolean.parseBoolean(oldValue);
-            boolean newEnabled = Boolean.parseBoolean(newValue);
-            if (oldEnabled && !newEnabled) {
-                throw new UnsupportedOperationException(
-                        String.format("Cannot disable table option '%s'.", key));
+        for (ConfigOption<Boolean> option : ONE_WAY_ENABLED_OPTIONS) {
+            if (option.key().equals(key)) {
+                boolean oldEnabled =
+                        oldValue == null ? option.defaultValue() : Boolean.parseBoolean(oldValue);
+                boolean newEnabled = Boolean.parseBoolean(newValue);
+                if (oldEnabled && !newEnabled) {
+                    throw new UnsupportedOperationException(
+                            String.format("Cannot disable table option '%s'.", key));
+                }
             }
         }
 
@@ -1163,20 +1158,11 @@ final class SchemaManagerUtils {
                     DELETION_VECTORS_ENABLED.defaultValue().toString());
         }
 
-        if (CoreOptions.DATA_EVOLUTION_NESTED_FIELD_ENABLED.key().equals(key)) {
-            checkAlterTableOption(
-                    options,
-                    key,
-                    options.get(key),
-                    CoreOptions.DATA_EVOLUTION_NESTED_FIELD_ENABLED.defaultValue().toString());
-        }
-
-        if (CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key().equals(key)) {
-            checkAlterTableOption(
-                    options,
-                    key,
-                    options.get(key),
-                    CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.defaultValue().toString());
+        for (ConfigOption<Boolean> option : ONE_WAY_ENABLED_OPTIONS) {
+            if (option.key().equals(key)) {
+                checkAlterTableOption(
+                        options, key, options.get(key), option.defaultValue().toString());
+            }
         }
 
         if (IGNORE_DELETE.key().equals(key)) {

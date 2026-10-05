@@ -27,9 +27,43 @@ columns also list that field, so ordinary columns keep their meaning.
 
 from typing import Dict, Iterable, List, Optional
 
+from pypaimon.common.options.core_options import CoreOptions
 from pypaimon.schema.data_types import DataField, MapType
 
 MAP_DELTA_PREFIX = "_MAP_DELTA_"
+
+
+def may_have_map_deltas(table) -> bool:
+    """Whether the files of ``table`` may store map deltas.
+
+    The Rust core behind the native paths does not know map deltas and would take a delta
+    for the whole map, so such a table keeps to the Python paths. The option can neither be
+    disabled nor changed by a dynamic option, see :func:`check_map_delta_option_change`, so it
+    covers every file.
+    """
+    return bool(table.options.data_evolution_map_delta_enabled())
+
+
+def _enabled(value) -> bool:
+    return value is not None and str(value).strip().lower() == "true"
+
+
+def check_map_delta_option_change(key: str, old_value, new_value, dynamic: bool) -> None:
+    """Reject a change of 'data-evolution.map-delta.enabled' that Java rejects as well.
+
+    Every file may hold map deltas once the option is enabled, and :func:`may_have_map_deltas`
+    relies on it, so it cannot be disabled or removed. A dynamic option cannot change it at
+    all: only an altered table tells every reader and writer that it may hold map deltas.
+    """
+    if (key != CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key()
+            or _enabled(old_value) == _enabled(new_value)):
+        return
+    if dynamic:
+        raise ValueError(
+            "Table option '%s' can only be changed by altering the table, not as a dynamic "
+            "option." % key)
+    if _enabled(old_value):
+        raise ValueError("Cannot disable table option '%s'." % key)
 
 
 def _marker_field(by_name: Dict[str, DataField], write_col: str) -> Optional[DataField]:

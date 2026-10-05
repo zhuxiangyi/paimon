@@ -18,6 +18,7 @@
 
 package org.apache.paimon.operation;
 
+import org.apache.paimon.data.shredding.MapSelectedKeysMetadataUtils;
 import org.apache.paimon.reader.DataEvolutionRow;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.MapType;
@@ -181,7 +182,12 @@ class DataEvolutionReadPlanner {
 
         for (int j = 0; j < numFields; j++) {
             DataField rf = allReadFields.get(j);
-            List<Integer> leaves = leafIdsOf(rf);
+            // a read of selected map keys is the map, the fields of its ROW type are no table
+            // fields
+            boolean wholeField =
+                    !(rf.type() instanceof RowType)
+                            || MapSelectedKeysMetadataUtils.isMapSelectedKeysField(rf);
+            List<Integer> leaves = wholeField ? Collections.singletonList(rf.id()) : leafIdsOf(rf);
             Map<Integer, Integer> leafProvider = new HashMap<>();
             Set<Integer> providers = new LinkedHashSet<>();
             for (int leaf : leaves) {
@@ -192,7 +198,7 @@ class DataEvolutionReadPlanner {
                 }
             }
 
-            if (!(rf.type() instanceof RowType)) {
+            if (wholeField) {
                 if (!providers.isEmpty()) {
                     int b = providers.iterator().next();
                     bunchSelection.get(b).put(rf.id(), null);
@@ -381,7 +387,8 @@ class DataEvolutionReadPlanner {
      * ordered latest first. A field without a base is {@code null}: it did not exist when the rows
      * were written, and a delta of a {@code null} map is {@code null}. An incremental read only
      * sees the files added in its range, so a missing base does not tell that and the read fails:
-     * neither {@code null} nor the deltas are the value of the field.
+     * neither {@code null} nor the deltas are the value of the field. A read of selected map keys
+     * fails as well when it meets a delta, it does not hold the whole map to merge into.
      */
     private void planMapDeltas(DataEvolutionReadPlan plan) {
         if (bunchMapDeltaFieldIds.stream().allMatch(Set::isEmpty)) {
@@ -390,7 +397,9 @@ class DataEvolutionReadPlanner {
         List<DataField> readFields = readRowType.getFields();
         for (int j = 0; j < readFields.size(); j++) {
             DataField rf = readFields.get(j);
-            if (!(rf.type() instanceof MapType)) {
+            // a read of selected map keys has the map's id but a ROW type
+            boolean selectedKeys = MapSelectedKeysMetadataUtils.isMapSelectedKeysField(rf);
+            if (!(rf.type() instanceof MapType) && !selectedKeys) {
                 continue;
             }
             List<Integer> deltas = new ArrayList<>();
@@ -409,6 +418,15 @@ class DataEvolutionReadPlanner {
             if (deltas.isEmpty()) {
                 // the latest provider stores the field whole, the plan already takes it from there
                 continue;
+            }
+            if (selectedKeys) {
+                // a delta does not tell an absent key from a NULL value once read as selected keys
+                throw new UnsupportedOperationException(
+                        String.format(
+                                "Cannot read selected keys of map column '%s': the read range "
+                                        + "holds map deltas of it, which can only be merged into "
+                                        + "the whole map. Read the whole map instead.",
+                                rf.name()));
             }
             if (base < 0 && incremental) {
                 throw new UnsupportedOperationException(

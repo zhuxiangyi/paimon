@@ -829,6 +829,18 @@ class CoreOptions:
         .with_description("Whether to enable data evolution.")
     )
 
+    DATA_EVOLUTION_MAP_DELTA_ENABLED: ConfigOption[bool] = (
+        ConfigOptions.key("data-evolution.map-delta.enabled")
+        .boolean_type()
+        .default_value(False)
+        .with_description(
+            "Whether the Java writer may store top-level map columns as map deltas, "
+            "see pypaimon.schema.map_delta_columns. The option cannot be changed by a "
+            "dynamic option, nor disabled once enabled, so a table without it has no "
+            "map deltas."
+        )
+    )
+
     DATA_EVOLUTION_WRITE_COLS_OPTIMIZATION_ENABLED: ConfigOption[bool] = (
         ConfigOptions.key("data-evolution.write-cols-optimization.enabled")
         .boolean_type()
@@ -1582,6 +1594,9 @@ class CoreOptions:
 
     def data_evolution_enabled(self, default=None):
         return self.options.get(CoreOptions.DATA_EVOLUTION_ENABLED, default)
+
+    def data_evolution_map_delta_enabled(self, default=None):
+        return self.options.get(CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED, default)
 
     def data_evolution_write_cols_optimization_enabled(self, default=None):
         return self.options.get(

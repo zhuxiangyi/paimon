@@ -27,6 +27,7 @@ import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalArray;
 import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateBuilder;
@@ -46,14 +47,18 @@ import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.system.FilesTable;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.Range;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -206,6 +211,56 @@ public class MapDeltaDataEvolutionTableTest extends DataEvolutionTestBase {
                 .extracting(r -> toJavaMap(r.getMap(1)))
                 .containsExactly(map("a", 1, "b", 3), map("a", 2));
         assertThat(reordered).extracting(r -> r.getInt(2)).containsExactly(0, 1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"parquet", "orc", "avro"})
+    public void testBaseAndDeltaReadingTheSameFields(String format) throws Exception {
+        createTable(CoreOptions.FILE_FORMAT.key(), format);
+        writeBase(Arrays.asList(map("a", 1), map("a", 2)));
+        writeDelta(Arrays.asList(map("b", 3), map()));
+
+        // the base and the delta both read just m, from files storing different columns
+        RowType onlyMap = getTableDefault().rowType().project(Collections.singletonList("m"));
+        assertThat(readRows(onlyMap))
+                .extracting(r -> toJavaMap(r.getMap(0)))
+                .containsExactly(map("a", 1, "b", 3), map("a", 2));
+        assertThat(readMaps()).containsExactly(map("a", 1, "b", 3), map("a", 2));
+    }
+
+    @Test
+    public void testBaseAndDeltaReadThroughRowSidecars() throws Exception {
+        createTable(CoreOptions.DATA_EVOLUTION_ROW_SIDECAR_ENABLED.key(), "true");
+        int n = 100;
+        List<Map<String, Integer>> base = new ArrayList<>();
+        List<Map<String, Integer>> delta = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            base.add(map("a", i));
+            delta.add(i == 3 ? map("b", 30) : map());
+        }
+        writeBase(base);
+        writeDelta(delta);
+        assertThat(dataFiles())
+                .allSatisfy(
+                        file ->
+                                assertThat(file.extraFiles())
+                                        .anyMatch(extra -> extra.endsWith(".row")));
+
+        // a sparse selection reads the row sidecars, which are decoded by position: the sidecar of
+        // the base stores every column and the one of the delta only m
+        Consumer<ReadBuilder> sparse =
+                rb -> rb.withRowRanges(Arrays.asList(new Range(3, 3), new Range(7, 7)));
+        RowType full = getTableDefault().rowType();
+        assertThat(readRows(full.project(Collections.singletonList("m")), sparse))
+                .extracting(r -> toJavaMap(r.getMap(0)))
+                .containsExactly(map("a", 3, "b", 30), map("a", 7));
+        List<InternalRow> rows = readRows(full, sparse);
+        assertThat(rows).extracting(r -> r.getInt(0)).containsExactly(3, 7);
+        assertThat(rows).extracting(r -> r.getString(1).toString()).containsExactly("c3", "c7");
+        assertThat(rows)
+                .extracting(r -> toJavaMap(r.getMap(2)))
+                .containsExactly(map("a", 3, "b", 30), map("a", 7));
+        assertThat(rows).extracting(r -> r.getInt(3)).containsExactly(30, 70);
     }
 
     @Test
@@ -784,6 +839,22 @@ public class MapDeltaDataEvolutionTableTest extends DataEvolutionTestBase {
 
     // ------------------------------------------------------------------------------------------
 
+    /** Creates the default table with one more option. */
+    private void createTable(String key, String value) throws Exception {
+        Schema schema = schemaDefault();
+        Map<String, String> options = new HashMap<>(schema.options());
+        options.put(key, value);
+        catalog.createTable(
+                identifier(),
+                new Schema(
+                        schema.fields(),
+                        schema.partitionKeys(),
+                        schema.primaryKeys(),
+                        options,
+                        schema.comment()),
+                false);
+    }
+
     private void writeBase(List<Map<String, Integer>> maps) throws Exception {
         BatchWriteBuilder builder = getTableDefault().newBatchWriteBuilder();
         try (BatchTableWrite write = builder.newWrite()) {
@@ -878,21 +949,11 @@ public class MapDeltaDataEvolutionTableTest extends DataEvolutionTestBase {
         ReadBuilder readBuilder = getTableDefault().newReadBuilder().withReadType(readType);
         configure.accept(readBuilder);
         List<InternalRow> rows = new ArrayList<>();
-        InternalRow.FieldGetter[] getters = new InternalRow.FieldGetter[readType.getFieldCount()];
-        for (int i = 0; i < getters.length; i++) {
-            getters[i] = InternalRow.createFieldGetter(readType.getTypeAt(i), i);
-        }
+        InternalRowSerializer serializer = new InternalRowSerializer(readType);
         try (RecordReader<InternalRow> reader =
                 readBuilder.newRead().createReader(readBuilder.newScan().plan())) {
-            reader.forEachRemaining(
-                    row -> {
-                        // copy the row, the reader reuses it
-                        Object[] values = new Object[getters.length];
-                        for (int i = 0; i < getters.length; i++) {
-                            values[i] = getters[i].getFieldOrNull(row);
-                        }
-                        rows.add(GenericRow.of(values));
-                    });
+            // deep copy the row, the reader reuses it and may reuse its maps
+            reader.forEachRemaining(row -> rows.add(serializer.copy(row)));
         }
         return rows;
     }

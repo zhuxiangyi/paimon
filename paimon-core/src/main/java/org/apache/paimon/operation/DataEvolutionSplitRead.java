@@ -496,10 +496,25 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
             long schemaId = firstFile.schemaId();
             TableSchema dataSchema = bunchDataSchemas[i];
             RowType partialReadRowType = new RowType(readFields);
-            List<String> cacheKey =
-                    nestedFieldEnabled
-                            ? readerCacheKey(readFields, dataSchema.fields(), true)
-                            : readFields.stream().map(DataField::name).collect(Collectors.toList());
+            List<String> cacheKey;
+            if (nestedFieldEnabled) {
+                cacheKey = readerCacheKey(readFields, dataSchema.fields(), true);
+            } else {
+                // the data schema is part of the key, it is determined by the schema id and the
+                // write columns: a base and its map deltas read the same fields from files
+                // storing different columns
+                List<String> writeCols = firstFile.writeCols();
+                cacheKey = new ArrayList<>();
+                cacheKey.add(String.valueOf(readFields.size()));
+                for (DataField field : readFields) {
+                    cacheKey.add(field.name());
+                }
+                if (writeCols == null) {
+                    cacheKey.add(null);
+                } else {
+                    cacheKey.addAll(writeCols);
+                }
+            }
             FormatReaderMapping formatReaderMapping =
                     formatReaderMappings.computeIfAbsent(
                             new FormatKey(schemaId, formatIdentifier, cacheKey),

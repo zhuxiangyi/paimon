@@ -42,7 +42,6 @@ import org.apache.paimon.reader.RecordReaderIterator;
 import org.apache.paimon.schema.MapDeltaColumns;
 import org.apache.paimon.statistics.SimpleColStatsCollector;
 import org.apache.paimon.types.DataField;
-import org.apache.paimon.types.MapType;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.ExceptionUtils;
@@ -233,46 +232,8 @@ public abstract class BaseAppendFileStoreWrite extends MemoryFileStoreWrite<Inte
             updateWriteCols();
             return this;
         }
-        if (!options.dataEvolutionEnabled() || !options.dataEvolutionMapDeltaEnabled()) {
-            throw new UnsupportedOperationException(
-                    String.format(
-                            "Writing map deltas requires %s=true and %s=true.",
-                            CoreOptions.DATA_EVOLUTION_ENABLED.key(),
-                            CoreOptions.DATA_EVOLUTION_MAP_DELTA_ENABLED.key()));
-        }
         Set<String> deltaColumns = new LinkedHashSet<>(columns);
-        if (MapDeltaColumns.writesDedicatedFiles(rowType, writeType, options)) {
-            throw new UnsupportedOperationException(
-                    "Map deltas cannot be written together with columns stored in dedicated "
-                            + "blob or vector files.");
-        }
-        for (String column : deltaColumns) {
-            if (!writeType.containsField(column)
-                    || !(writeType.getField(column).type() instanceof MapType)
-                    || !rowType.containsField(column)) {
-                throw new IllegalArgumentException(
-                        String.format(
-                                "Map delta column '%s' is not a top-level map column of the write "
-                                        + "type %s.",
-                                column, writeType));
-            }
-            if (!MapDeltaColumns.supportsType(writeType.getField(column).type())) {
-                throw new UnsupportedOperationException(
-                        String.format(
-                                "Map delta column '%s' has keys of type %s, which cannot be "
-                                        + "merged as map deltas.",
-                                column,
-                                ((MapType) writeType.getField(column).type()).getKeyType()));
-            }
-            String deltaColumn = MapDeltaColumns.encode(column);
-            if (rowType.containsField(deltaColumn)) {
-                throw new UnsupportedOperationException(
-                        String.format(
-                                "Cannot write a map delta of column '%s' because the table has a "
-                                        + "column named '%s', which is how the delta is recorded.",
-                                column, deltaColumn));
-            }
-        }
+        MapDeltaColumns.validate(rowType, writeType, deltaColumns, options);
         this.mapDeltaColumns = deltaColumns;
         updateWriteCols();
         return this;

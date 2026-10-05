@@ -48,6 +48,7 @@ from pypaimon.read.scanner.incremental_diff_scanner import \
     IncrementalDiffScanner
 from pypaimon.read.scanner.primary_key_table_split_generator import \
     PrimaryKeyTableSplitGenerator
+from pypaimon.schema.map_delta_columns import may_have_map_deltas
 from pypaimon.snapshot.snapshot import Snapshot
 
 
@@ -375,8 +376,10 @@ class AsyncStreamingTableScan:
         setup or planning error is an optimization miss and falls back before
         a plan is returned.
         """
+        # Rust would prune by the stats of map deltas as if they were whole maps
         if (not self.table.options.native_plan_enabled()
-                or self._bucket_filter is not None):
+                or self._bucket_filter is not None
+                or may_have_map_deltas(self.table)):
             return None
         # Rust's full-snapshot scan currently has batch visibility semantics.
         # For first-row and non-MOR deletion-vector tables it hides level-0

@@ -24,6 +24,7 @@ from pypaimon.common.options.core_options import CoreOptions
 from pypaimon.common.options.options import Options
 from pypaimon.read.read_builder import ReadBuilder
 from pypaimon.read.stream_read_builder import StreamReadBuilder
+from pypaimon.schema.map_delta_columns import check_map_delta_option_change
 from pypaimon.schema.schema_manager import SchemaManager
 from pypaimon.schema.table_schema import TableSchema
 from pypaimon.table.bucket_mode import BucketMode
@@ -539,6 +540,9 @@ class FileStoreTable(Table):
             raise ValueError('Cannot change immutable option ' + directory_key)
         if CoreOptions.BUCKET.key() in options and int(options.get(CoreOptions.BUCKET.key())) != self.options.bucket():
             raise ValueError("Cannot change bucket number")
+        for key, value in options.items():
+            check_map_delta_option_change(
+                key, self.options.data_evolution_map_delta_enabled(), value, dynamic=True)
         new_options = CoreOptions.copy(self.options).options.to_map()
         for k, v in options.items():
             if v is None:

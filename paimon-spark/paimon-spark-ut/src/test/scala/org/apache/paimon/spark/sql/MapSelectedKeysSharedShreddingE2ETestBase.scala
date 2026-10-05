@@ -22,6 +22,7 @@ import org.apache.paimon.spark.{PaimonScan, PaimonSparkTestBase}
 
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
+import org.apache.spark.sql.internal.SQLConf
 
 abstract class MapSelectedKeysSharedShreddingE2ETestBase extends PaimonSparkTestBase {
 
@@ -238,6 +239,75 @@ abstract class MapSelectedKeysSharedShreddingE2ETestBase extends PaimonSparkTest
               Row(3, null) :: Nil)
         }
       }
+  }
+
+  Seq(true, false).foreach {
+    mapDelta =>
+      test(s"selected shared-shredding map keys after a map_concat merge, map delta: $mapDelta") {
+        withTable("S", "T") {
+          withSQLConf(SQLConf.MAP_KEY_DEDUP_POLICY.key -> "LAST_WIN") {
+            sql(s"""
+                   |CREATE TABLE T (id INT, attrs MAP<STRING, BIGINT>)
+                   |TBLPROPERTIES (
+                   |  'row-tracking.enabled' = 'true',
+                   |  'data-evolution.enabled' = 'true',
+                   |  'data-evolution.map-delta.enabled' = '$mapDelta',
+                   |  'fields.attrs.map.storage-layout' = 'shared-shredding'
+                   |)
+                   |""".stripMargin)
+            sql("""
+                  |INSERT INTO T VALUES
+                  |  (1, map('key1', CAST(10 AS BIGINT), 'key2', CAST(20 AS BIGINT))),
+                  |  (2, map('key1', CAST(30 AS BIGINT))),
+                  |  (3, map('cold', CAST(40 AS BIGINT)))
+                  |""".stripMargin)
+            sql("""
+                  |CREATE TABLE S AS SELECT * FROM VALUES
+                  |  (1, map('key2', CAST(21 AS BIGINT), 'new', CAST(1 AS BIGINT))),
+                  |  (3, map('key1', CAST(41 AS BIGINT)))
+                  |  AS S(id, d)
+                  |""".stripMargin)
+            sql("""
+                  |MERGE INTO T USING S ON T.id = S.id
+                  |WHEN MATCHED THEN UPDATE SET attrs = map_concat(T.attrs, S.d)
+                  |""".stripMargin)
+
+            val query =
+              sql("SELECT id, attrs['key1'], attrs['key2'], attrs['new'] FROM T ORDER BY id")
+            checkAnswer(
+              query,
+              Row(1, 10L, 21L, 1L) :: Row(2, 30L, null, null) :: Row(3, 41L, null, null) :: Nil)
+            // a selected-key read cannot merge map deltas, it reads the whole map instead
+            assert(pushedMapSelectedKeys(query).contains("attrs") == !mapDelta)
+          }
+        }
+      }
+  }
+
+  test("selected shared-shredding map keys of a nested-field data evolution table") {
+    withTable("S", "T") {
+      sql("""
+            |CREATE TABLE T (id INT, c STRING, attrs MAP<STRING, BIGINT>)
+            |TBLPROPERTIES (
+            |  'row-tracking.enabled' = 'true',
+            |  'data-evolution.enabled' = 'true',
+            |  'data-evolution.nested-field.enabled' = 'true',
+            |  'fields.attrs.map.storage-layout' = 'shared-shredding'
+            |)
+            |""".stripMargin)
+      sql("""
+            |INSERT INTO T VALUES
+            |  (1, 'a', map('key1', CAST(10 AS BIGINT), 'key2', CAST(20 AS BIGINT))),
+            |  (2, 'b', map('key2', CAST(30 AS BIGINT)))
+            |""".stripMargin)
+      // a newer file of c only; the ROW fields of the selected keys are no table fields
+      sql("CREATE TABLE S AS SELECT * FROM VALUES (1, 'x') AS S(id, c)")
+      sql("MERGE INTO T USING S ON T.id = S.id WHEN MATCHED THEN UPDATE SET c = S.c")
+
+      val query = sql("SELECT id, c, attrs['key1'], attrs['key2'] FROM T ORDER BY id")
+      checkAnswer(query, Row(1, "x", 10L, 20L) :: Row(2, "b", null, 30L) :: Nil)
+      assert(pushedMapSelectedKeys(query).contains("attrs"))
+    }
   }
 
   private def checkMapAggregatorRead(

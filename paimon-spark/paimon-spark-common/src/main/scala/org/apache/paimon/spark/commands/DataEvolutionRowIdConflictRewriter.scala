@@ -23,13 +23,12 @@ import org.apache.paimon.data.BinaryRow
 import org.apache.paimon.format.blob.BlobFileFormat.isBlobFile
 import org.apache.paimon.io.{DataFileMeta, DataIncrement}
 import org.apache.paimon.operation.commit.RowIdExistenceConflictException
-import org.apache.paimon.schema.{MapDeltaColumns, TableSchema}
 import org.apache.paimon.spark.util.ScanPlanHelper
 import org.apache.paimon.table.{FileStoreTable, SpecialFields}
 import org.apache.paimon.table.sink.{CommitMessage, CommitMessageImpl}
 import org.apache.paimon.table.source.DataSplit
 import org.apache.paimon.types.VectorType.isVectorStoreFile
-import org.apache.paimon.utils.{DataEvolutionUtils, ExceptionUtils, Range, RetryWaiter}
+import org.apache.paimon.utils.{ExceptionUtils, Range, RetryWaiter}
 
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.PaimonUtils.createDataset
@@ -53,7 +52,6 @@ private[spark] class DataEvolutionRowIdConflictRewriter(
   import DataEvolutionRowIdConflictRewriter._
 
   private val partialColumns = new DataEvolutionPartialColumns(table)
-  private val fileSchemaCache = mutable.HashMap.empty[Long, TableSchema]
 
   def rewrite(
       sparkSession: SparkSession,
@@ -87,7 +85,7 @@ private[spark] class DataEvolutionRowIdConflictRewriter(
     }
     // A map delta only holds the entries merged into a row, so it cannot be rebased onto the
     // latest values like a column written whole. Leave the conflict to the commit.
-    if (stagedFiles.exists(staged => hasMapDeltas(staged.file))) {
+    if (stagedFiles.exists(staged => partialColumns.hasMapDeltas(staged.file))) {
       return None
     }
 
@@ -117,7 +115,7 @@ private[spark] class DataEvolutionRowIdConflictRewriter(
     }
 
     val rewrittenMessages = candidates
-      .groupBy(staged => partialFileWriteCols(staged.file).get)
+      .groupBy(staged => partialColumns.partialFileWriteCols(staged.file).get)
       .toSeq
       .flatMap {
         case (columnNames, files) =>
@@ -237,23 +235,11 @@ private[spark] class DataEvolutionRowIdConflictRewriter(
   private def isRewriteCandidate(file: DataFileMeta, nextRowId: Long): Boolean = {
     isNormalRowIdFile(file) &&
     file.firstRowId() < nextRowId &&
-    partialFileWriteCols(file).exists(
-      columns => columns.nonEmpty && columns.forall(column => !SpecialFields.isSystemField(column)))
-  }
-
-  private def partialFileWriteCols(file: DataFileMeta): Option[Seq[String]] = {
-    val columns = DataEvolutionUtils.partialFileWriteCols(fileSchema(file), file)
-    if (columns.isPresent) Some(columns.get().asScala.toSeq) else None
-  }
-
-  private def hasMapDeltas(file: DataFileMeta): Boolean =
-    MapDeltaColumns.hasDeltas(fileSchema(file), file.writeCols())
-
-  private def fileSchema(file: DataFileMeta): TableSchema = {
-    fileSchemaCache.getOrElseUpdate(
-      file.schemaId(),
-      if (file.schemaId() == table.schema().id()) table.schema()
-      else table.schemaManager().schema(file.schemaId()))
+    partialColumns
+      .partialFileWriteCols(file)
+      .exists(
+        columns =>
+          columns.nonEmpty && columns.forall(column => !SpecialFields.isSystemField(column)))
   }
 
   private def withoutCandidates(

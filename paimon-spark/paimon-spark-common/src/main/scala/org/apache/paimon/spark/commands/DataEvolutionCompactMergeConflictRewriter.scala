@@ -24,7 +24,6 @@ import org.apache.paimon.data.BinaryRow
 import org.apache.paimon.format.blob.BlobFileFormat.isBlobFile
 import org.apache.paimon.io.{CompactIncrement, DataFileMeta, DataIncrement}
 import org.apache.paimon.manifest.FileSource
-import org.apache.paimon.schema.{MapDeltaColumns, TableSchema}
 import org.apache.paimon.spark.util.ScanPlanHelper
 import org.apache.paimon.table.{FileStoreTable, SpecialFields}
 import org.apache.paimon.table.sink.{CommitMessage, CommitMessageImpl}
@@ -32,7 +31,7 @@ import org.apache.paimon.table.source.{DataSplit, IncrementalSplit}
 import org.apache.paimon.table.source.snapshot.SnapshotReader
 import org.apache.paimon.types.{RowType => PaimonRowType}
 import org.apache.paimon.types.VectorType.isVectorStoreFile
-import org.apache.paimon.utils.{DataEvolutionUtils, Range, RowRangeIndex}
+import org.apache.paimon.utils.{Range, RowRangeIndex}
 
 import org.apache.spark.sql.{functions, SparkSession}
 import org.apache.spark.sql.PaimonUtils.createDataset
@@ -57,7 +56,6 @@ class DataEvolutionCompactMergeConflictRewriter(
 
   private val partialColumns = new DataEvolutionPartialColumns(table)
   private val nestedFieldEnabled = table.coreOptions().dataEvolutionNestedFieldEnabled()
-  private val fileSchemaCache = mutable.HashMap.empty[Long, TableSchema]
 
   def rewrite(
       sparkSession: SparkSession,
@@ -131,7 +129,10 @@ class DataEvolutionCompactMergeConflictRewriter(
           // against top-level field names; collect their union instead, ordered by the schema.
           val updatedFields =
             updatedWritePaths(
-              files.flatMap(file => partialFileWriteCols(file.file).get).distinct.toSet)
+              files
+                .flatMap(file => partialColumns.partialFileWriteCols(file.file).get)
+                .distinct
+                .toSet)
           if (updatedFields.isEmpty) {
             return JOptional.empty()
           }
@@ -357,24 +358,12 @@ class DataEvolutionCompactMergeConflictRewriter(
   private def isRegularPartialFile(file: DataFileMeta): Boolean = {
     isNormalRowIdFile(file) &&
     file.fileSource().orElse(null) == FileSource.APPEND &&
-    partialFileWriteCols(file).exists(
-      columns =>
-        columns.nonEmpty && columns.forall(column => !SpecialFields.isSystemField(column))) &&
-    // a map delta only holds the entries merged into a row, it cannot be rebased onto the
-    // compacted values like a column written whole
-    !MapDeltaColumns.hasDeltas(fileSchema(file), file.writeCols())
-  }
-
-  private def partialFileWriteCols(file: DataFileMeta): Option[Seq[String]] = {
-    val columns = DataEvolutionUtils.partialFileWriteCols(fileSchema(file), file)
-    if (columns.isPresent) Some(columns.get().asScala.toSeq) else None
-  }
-
-  private def fileSchema(file: DataFileMeta): TableSchema = {
-    fileSchemaCache.getOrElseUpdate(
-      file.schemaId(),
-      if (file.schemaId() == table.schema().id()) table.schema()
-      else table.schemaManager().schema(file.schemaId()))
+    partialColumns
+      .partialFileWriteCols(file)
+      .exists(
+        columns =>
+          columns.nonEmpty && columns.forall(column => !SpecialFields.isSystemField(column))) &&
+    !partialColumns.hasMapDeltas(file)
   }
 
 }
